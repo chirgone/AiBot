@@ -312,7 +312,9 @@ function promptForSlot(slot: keyof ConversationSlots, slots: ConversationSlots):
 }
 
 function isAffirmative(message: string): boolean {
-  return /\b(s[ií]|correcto|claro|ok|okay|perfecto|confirmo|as[ií] es)\b/i.test(message);
+  return /\b(s[ií]|correcto|claro|ok|okay|perfecto|confirmo|confirmado|as[ií] es|exacto|adelante|de acuerdo|est[aá] bien|sale|va|listo|afirmativo|por favor)\b/i.test(
+    message,
+  );
 }
 
 function isNegative(message: string): boolean {
