@@ -70,7 +70,7 @@ Mensaje nuevo: ${userMessage}`,
       max_tokens: 256,
     });
 
-    return normalizeSlots(parseAiResponse(result));
+    return withHeuristics(userMessage, context, normalizeSlots(parseAiResponse(result)));
   } catch (error) {
     console.warn(
       JSON.stringify({
@@ -78,7 +78,7 @@ Mensaje nuevo: ${userMessage}`,
         error: error instanceof Error ? error.message : String(error),
       }),
     );
-    return fallbackExtractSlots(userMessage);
+    return withHeuristics(userMessage, context, fallbackExtractSlots(userMessage));
   }
 }
 
@@ -154,6 +154,174 @@ function fallbackExtractSlots(message: string): Partial<ConversationSlots> {
   }
 
   return slots;
+}
+
+function withHeuristics(
+  message: string,
+  context: ConversationContext,
+  slots: Partial<ConversationSlots>,
+): Partial<ConversationSlots> {
+  const enriched = { ...slots };
+  const lower = message.toLowerCase().trim();
+
+  if (!context.slots.nombre_cliente && !enriched.nombre_cliente) {
+    const possibleName = inferName(message);
+    if (possibleName) {
+      enriched.nombre_cliente = possibleName;
+    }
+  }
+
+  if (!context.slots.fecha_hora && !enriched.fecha_hora) {
+    const possibleDateTime = inferRelativeDateTime(lower);
+    if (possibleDateTime) {
+      enriched.fecha_hora = possibleDateTime;
+    }
+  }
+
+  if (!context.slots.motivo && !enriched.motivo) {
+    const possibleReason = inferReason(lower);
+    if (possibleReason) {
+      enriched.motivo = possibleReason;
+    }
+  }
+
+  return enriched;
+}
+
+function inferName(message: string): string | undefined {
+  const cleanMessage = message
+    .replace(/[.,!?¿¡]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const lower = cleanMessage.toLowerCase();
+
+  if (
+    !cleanMessage ||
+    lower.length < 2 ||
+    lower.length > 40 ||
+    /\d/.test(lower) ||
+    /\b(mañana|pasado|hoy|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo|limpieza|dolor|revisión|revision|cita|consulta|hora|tarde|mañana)\b/.test(
+      lower,
+    )
+  ) {
+    return undefined;
+  }
+
+  const nameMatch = lower.match(/(?:me llamo|soy|mi nombre es)\s+(.+)/i);
+  const rawName = nameMatch?.[1] ?? cleanMessage;
+  const words = rawName.split(/\s+/).filter(Boolean);
+  if (words.length > 4) {
+    return undefined;
+  }
+
+  return titleCase(words.join(" "));
+}
+
+function inferReason(lower: string): string | undefined {
+  if (lower.includes("limpieza")) return "limpieza dental";
+  if (lower.includes("revision") || lower.includes("revisión")) return "revisión dental";
+  if (lower.includes("dolor")) return "dolor dental";
+  if (lower.includes("muela")) return "molestia en una muela";
+  if (lower.includes("extraccion") || lower.includes("extracción")) return "extracción dental";
+  if (lower.includes("ortodoncia") || lower.includes("brackets")) return "ortodoncia";
+
+  if (lower.length >= 4 && lower.length <= 80 && !/\b(mañana|pasado|hoy|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo|hora|tarde)\b/.test(lower)) {
+    return lower;
+  }
+
+  return undefined;
+}
+
+function inferRelativeDateTime(lower: string): string | undefined {
+  if (!/\b(hoy|mañana|pasado mañana|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b/.test(lower)) {
+    return undefined;
+  }
+
+  const now = new Date();
+  const target = new Date(now);
+  const weekdayIndex = parseWeekday(lower);
+
+  if (lower.includes("pasado mañana")) {
+    target.setUTCDate(now.getUTCDate() + 2);
+  } else if (lower.includes("mañana")) {
+    target.setUTCDate(now.getUTCDate() + 1);
+  } else if (weekdayIndex !== undefined) {
+    const currentWeekday = now.getUTCDay();
+    const daysAhead = (weekdayIndex - currentWeekday + 7) % 7 || 7;
+    target.setUTCDate(now.getUTCDate() + daysAhead);
+  }
+
+  const time = parseSpokenTime(lower);
+  if (!time) {
+    return undefined;
+  }
+
+  return `${target.getUTCFullYear()}-${pad(target.getUTCMonth() + 1)}-${pad(target.getUTCDate())}T${pad(time.hour)}:${pad(time.minute)}:00-06:00`;
+}
+
+function parseWeekday(lower: string): number | undefined {
+  if (lower.includes("domingo")) return 0;
+  if (lower.includes("lunes")) return 1;
+  if (lower.includes("martes")) return 2;
+  if (lower.includes("miércoles") || lower.includes("miercoles")) return 3;
+  if (lower.includes("jueves")) return 4;
+  if (lower.includes("viernes")) return 5;
+  if (lower.includes("sábado") || lower.includes("sabado")) return 6;
+  return undefined;
+}
+
+function parseSpokenTime(lower: string): { hour: number; minute: number } | undefined {
+  const digitMatch = lower.match(/(?:a las|alas|a la|la)?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|de la mañana|de la tarde|de la noche|mañana|tarde|noche)?/);
+  const wordHour = parseHourWord(lower);
+
+  const hourValue = digitMatch?.[1] ? Number(digitMatch[1]) : wordHour;
+  if (!hourValue || hourValue > 23) {
+    return undefined;
+  }
+
+  const suffix = digitMatch?.[3] ?? "";
+  let hour = hourValue;
+  if ((suffix.includes("tarde") || suffix.includes("noche") || suffix === "pm") && hour < 12) {
+    hour += 12;
+  }
+  if ((suffix.includes("mañana") || suffix === "am") && hour === 12) {
+    hour = 0;
+  }
+
+  return {
+    hour,
+    minute: digitMatch?.[2] ? Number(digitMatch[2]) : 0,
+  };
+}
+
+function parseHourWord(lower: string): number | undefined {
+  const hours: Record<string, number> = {
+    una: 1,
+    uno: 1,
+    dos: 2,
+    tres: 3,
+    cuatro: 4,
+    cinco: 5,
+    seis: 6,
+    siete: 7,
+    ocho: 8,
+    nueve: 9,
+    diez: 10,
+    once: 11,
+    doce: 12,
+  };
+
+  for (const [word, hour] of Object.entries(hours)) {
+    if (new RegExp(`\\b${word}\\b`).test(lower)) {
+      return hour;
+    }
+  }
+
+  return undefined;
+}
+
+function pad(value: number): string {
+  return String(value).padStart(2, "0");
 }
 
 function clean(value: string | null | undefined): string | undefined {
