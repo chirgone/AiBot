@@ -1,0 +1,27 @@
+{
+  "name": "agentica",
+  "version": "1.0.0",
+  "description": "Agentica voice appointment agent on Cloudflare Workers, Durable Objects, Workers AI, and Twilio.",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "typecheck": "tsc --noEmit",
+    "check": "wrangler deploy --dry-run && tsc --noEmit"
+  },
+  "keywords": [
+    "cloudflare-workers",
+    "durable-objects",
+    "twilio",
+    "workers-ai"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.118.0"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "agentica-voice",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-31",
+  "compatibility_flags": ["nodejs_compat"],
+  "routes": [
+    {
+      "pattern": "agentica.angaflow.mx",
+      "custom_domain": true
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "VOICE_AGENT",
+        "class_name": "VoiceAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["VoiceAgent"]
+    }
+  ],
+  "vars": {
+    "ASSISTANT_NAME": "Sofía",
+    "BUSINESS_NAME": "Clínica Dental Smile",
+    "LANGUAGE": "es-MX",
+    "VOICE": "Polly.Mia-Neural",
+    "TIME_ZONE": "America/Mexico_City",
+    "AI_MODEL": "@cf/meta/llama-3.1-8b-instruct-fast",
+    "SKIP_SIGNATURE_VALIDATION": "true"
+  }
+}
