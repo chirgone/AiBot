@@ -235,7 +235,7 @@ export class VoiceAgent extends DurableObject<Env> {
 
     if (missingSlots.length === 0) {
       return {
-        responseText: `Va. Tengo una cita para ${slots.nombre_cliente}, ${formatDateTimeForSpeech(slots.fecha_hora)}, por ${slots.motivo}. ¿Así está bien?`,
+        responseText: `Perfecto. Tengo registrada una cita para ${slots.nombre_cliente}, ${formatDateTimeForSpeech(slots.fecha_hora)}, por ${slots.motivo}. ¿Es correcto?`,
         dialogState: "confirming",
         missingSlots,
         isComplete: false,
