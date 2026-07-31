@@ -51,6 +51,7 @@ Reglas:
 - Extrae solo datos que el usuario dijo o confirmó.
 - Si el usuario dice mañana, pasado mañana, lunes, etc., normaliza a ISO 8601.
 - Si el usuario dice 4 de la tarde, normaliza a 16:00.
+- Si el usuario solo dice un día sin hora, responde null en fecha_hora.
 - Si falta un dato, responde null en ese campo.
 - No inventes teléfono si no aparece.
 - Responde solo con JSON válido conforme al schema.`,
@@ -171,11 +172,9 @@ function withHeuristics(
     }
   }
 
-  if (!context.slots.fecha_hora && !enriched.fecha_hora) {
-    const possibleDateTime = inferRelativeDateTime(lower);
-    if (possibleDateTime) {
-      enriched.fecha_hora = possibleDateTime;
-    }
+  const deterministicDateTime = inferRelativeDateTime(lower);
+  if (deterministicDateTime && !context.slots.fecha_hora) {
+    enriched.fecha_hora = deterministicDateTime;
   }
 
   if (!context.slots.motivo && !enriched.motivo) {
@@ -237,18 +236,18 @@ function inferRelativeDateTime(lower: string): string | undefined {
     return undefined;
   }
 
-  const now = new Date();
-  const target = new Date(now);
+  const today = getMexicoCityToday();
+  const target = new Date(Date.UTC(today.year, today.month - 1, today.day, 12, 0, 0));
   const weekdayIndex = parseWeekday(lower);
 
   if (lower.includes("pasado mañana")) {
-    target.setUTCDate(now.getUTCDate() + 2);
+    target.setUTCDate(target.getUTCDate() + 2);
   } else if (lower.includes("mañana")) {
-    target.setUTCDate(now.getUTCDate() + 1);
+    target.setUTCDate(target.getUTCDate() + 1);
   } else if (weekdayIndex !== undefined) {
-    const currentWeekday = now.getUTCDay();
+    const currentWeekday = target.getUTCDay();
     const daysAhead = (weekdayIndex - currentWeekday + 7) % 7 || 7;
-    target.setUTCDate(now.getUTCDate() + daysAhead);
+    target.setUTCDate(target.getUTCDate() + daysAhead);
   }
 
   const time = parseSpokenTime(lower);
@@ -257,6 +256,25 @@ function inferRelativeDateTime(lower: string): string | undefined {
   }
 
   return `${target.getUTCFullYear()}-${pad(target.getUTCMonth() + 1)}-${pad(target.getUTCDate())}T${pad(time.hour)}:${pad(time.minute)}:00-06:00`;
+}
+
+function getMexicoCityToday(): { year: number; month: number; day: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Mexico_City",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+
+  const year = Number(parts.find((part) => part.type === "year")?.value);
+  const month = Number(parts.find((part) => part.type === "month")?.value);
+  const day = Number(parts.find((part) => part.type === "day")?.value);
+
+  if (!year || !month || !day) {
+    throw new Error("Could not resolve Mexico City date");
+  }
+
+  return { year, month, day };
 }
 
 function parseWeekday(lower: string): number | undefined {
@@ -279,7 +297,7 @@ function parseSpokenTime(lower: string): { hour: number; minute: number } | unde
     return undefined;
   }
 
-  const suffix = digitMatch?.[3] ?? "";
+  const suffix = digitMatch?.[3] ?? parseTimeSuffix(lower) ?? "";
   let hour = hourValue;
   if ((suffix.includes("tarde") || suffix.includes("noche") || suffix === "pm") && hour < 12) {
     hour += 12;
@@ -292,6 +310,13 @@ function parseSpokenTime(lower: string): { hour: number; minute: number } | unde
     hour,
     minute: digitMatch?.[2] ? Number(digitMatch[2]) : 0,
   };
+}
+
+function parseTimeSuffix(lower: string): string | undefined {
+  if (/\b(pm|de la tarde|tarde)\b/.test(lower)) return "tarde";
+  if (/\b(de la noche|noche)\b/.test(lower)) return "noche";
+  if (/\b(am|de la mañana)\b/.test(lower)) return "mañana";
+  return undefined;
 }
 
 function parseHourWord(lower: string): number | undefined {
