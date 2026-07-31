@@ -10,7 +10,7 @@ Agente telefónico de citas para PyMEs usando Cloudflare Workers, Durable Object
 - Twilio inbound webhook: `https://agentica.angaflow.mx/webhook/voice`
 - Voz actual: `Polly.Mia-Neural`
 - Idioma: `es-MX`
-- STT Twilio: `<Gather input="speech" speechModel="experimental_conversations">`
+- STT Twilio: `<Gather input="speech" speechTimeout="2" timeout="6">`
 - Seguridad temporal: `SKIP_SIGNATURE_VALIDATION="true"` para desbloquear el MVP. Rehabilitar validación de firma antes de producción.
 
 ## Stack
