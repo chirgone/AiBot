@@ -12,7 +12,7 @@ const slotSchema = {
   properties: {
     nombre_cliente: {
       type: ["string", "null"],
-      description: "Nombre completo o nombre de pila del paciente/cliente, si aparece.",
+      description: "Nombre completo o nombre de pila del cliente o contacto, si aparece.",
     },
     telefono: {
       type: ["string", "null"],
@@ -24,7 +24,7 @@ const slotSchema = {
     },
     motivo: {
       type: ["string", "null"],
-      description: "Motivo de la cita, por ejemplo limpieza dental, revisión, dolor, extracción.",
+      description: "Tema de la solicitud o asesoría, por ejemplo Cómputo y DaaS, Servidores y Nube OnPremise, Redes, Ciberseguridad y Videovigilancia, SOC & NOC as a Service, Videocolaboración y Automatización de Espacios o Arrendamiento Tecnológico.",
     },
   },
   required: ["nombre_cliente", "telefono", "fecha_hora", "motivo"],
@@ -44,7 +44,8 @@ export async function extractSlots(
       messages: [
         {
           role: "system",
-          content: `Eres un extractor de datos para agendar citas por teléfono en México.
+          content: `Eres un extractor de datos para registrar solicitudes de asesoría TI por teléfono en México para Alta Sistemas.
+Alta Sistemas ofrece una propuesta integral de tecnología para negocios mexicanos: Servicios Administrados de Cómputo y Device as a Service, Servidores y Nube OnPremise, Data Center, Almacenamiento y Virtualización, Redes, Ciberseguridad y Videovigilancia, SOC & NOC as a Service, Videocolaboración y Automatización de Espacios, y Arrendamiento Tecnológico Empresarial.
 Hoy es ${new Date().toISOString()}.
 Zona horaria operativa: ${env.TIME_ZONE}.
 Reglas:
@@ -146,13 +147,7 @@ function fallbackExtractSlots(message: string): Partial<ConversationSlots> {
     slots.telefono = phoneMatch[0].replace(/\s+/g, " ").trim();
   }
 
-  if (lower.includes("limpieza")) {
-    slots.motivo = "limpieza dental";
-  } else if (lower.includes("revisión") || lower.includes("revision")) {
-    slots.motivo = "revisión dental";
-  } else if (lower.includes("dolor")) {
-    slots.motivo = "dolor dental";
-  }
+  slots.motivo = inferReason(lower);
 
   return slots;
 }
@@ -199,7 +194,7 @@ function inferName(message: string): string | undefined {
     lower.length < 2 ||
     lower.length > 40 ||
     /\d/.test(lower) ||
-    /\b(mañana|pasado|hoy|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo|limpieza|dolor|revisión|revision|cita|consulta|hora|tarde|mañana)\b/.test(
+    /\b(mañana|pasado|hoy|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo|infraestructura|ciberseguridad|seguridad|redes|wifi|lan|cctv|videovigilancia|data|center|nube|onpremise|almacenamiento|virtualización|virtualizacion|servidores|soc|noc|soporte|mantenimiento|cómputo|computo|daas|device|videocolaboración|videocolaboracion|audioconferencia|automatización|automatizacion|arrendamiento|leasing|financiamiento|ataque|ransomware|cita|consulta|asesoría|asesoria|hora|tarde|mañana)\b/.test(
       lower,
     )
   ) {
@@ -217,12 +212,19 @@ function inferName(message: string): string | undefined {
 }
 
 function inferReason(lower: string): string | undefined {
-  if (lower.includes("limpieza")) return "limpieza dental";
-  if (lower.includes("revision") || lower.includes("revisión")) return "revisión dental";
-  if (lower.includes("dolor")) return "dolor dental";
-  if (lower.includes("muela")) return "molestia en una muela";
-  if (lower.includes("extraccion") || lower.includes("extracción")) return "extracción dental";
-  if (lower.includes("ortodoncia") || lower.includes("brackets")) return "ortodoncia";
+  if (lower.includes("ransomware") || lower.includes("ataque") || lower.includes("incidente")) return "respuesta inmediata y ciberseguridad con monitoreo 24/7";
+  if (lower.includes("soc") || lower.includes("monitoreo de seguridad")) return "SOC como servicio y monitoreo de seguridad 24/7";
+  if (lower.includes("noc") || lower.includes("monitoreo de red")) return "NOC como servicio para monitoreo de infraestructura";
+  if (lower.includes("ciberseguridad") || lower.includes("seguridad") || lower.includes("firewall")) return "redes, ciberseguridad y videovigilancia";
+  if (lower.includes("wifi") || lower.includes("lan") || lower.includes("redes") || lower.includes("cctv") || lower.includes("videovigilancia")) return "redes empresariales, ciberseguridad y videovigilancia";
+  if (lower.includes("data center") || lower.includes("datacenter") || lower.includes("nube privada") || lower.includes("onpremise") || lower.includes("on premise")) return "data centers y nube privada OnPremise";
+  if (lower.includes("almacenamiento") || lower.includes("virtualización") || lower.includes("virtualizacion")) return "almacenamiento y virtualización";
+  if (lower.includes("servidor") || lower.includes("servidores")) return "servidores y nube privada";
+  if (lower.includes("infraestructura") || lower.includes("daas") || lower.includes("device") || lower.includes("cómputo") || lower.includes("computo") || lower.includes("laptops") || lower.includes("equipos")) return "servicios administrados de cómputo y DaaS";
+  if (lower.includes("soporte") || lower.includes("mantenimiento")) return "soporte y mantenimiento TI";
+  if (lower.includes("videocolaboración") || lower.includes("videocolaboracion") || lower.includes("audioconferencia") || lower.includes("salas") || lower.includes("automatización") || lower.includes("automatizacion")) return "videocolaboración y automatización de espacios";
+  if (lower.includes("arrendamiento") || lower.includes("leasing") || lower.includes("financiamiento")) return "arrendamiento tecnológico con planes flexibles";
+  if (lower.includes("pantallas") || lower.includes("digital signage")) return "pantallas digitales";
 
   if (lower.length >= 4 && lower.length <= 80 && !/\b(mañana|pasado|hoy|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo|hora|tarde)\b/.test(lower)) {
     return lower;

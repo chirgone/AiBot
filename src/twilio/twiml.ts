@@ -8,7 +8,7 @@ export interface GatherOptions {
 export function twimlGather(options: GatherOptions): Response {
   const body = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="${escapeXml(options.action)}" method="POST" language="${escapeXml(options.language)}" speechTimeout="2" timeout="6" actionOnEmptyResult="true" hints="cita,agendar,limpieza dental,revisión,dolor,muela,extracción,ortodoncia,mañana,pasado mañana,tarde,nombre,hora">
+  <Gather input="speech" action="${escapeXml(options.action)}" method="POST" language="${escapeXml(options.language)}" speechTimeout="2" timeout="6" actionOnEmptyResult="true" hints="asesoría,propuesta integral,soluciones tecnológicas,cómputo,DaaS,Device as a Service,servidores,nube OnPremise,data center,almacenamiento,virtualización,redes,WiFi,LAN,ciberseguridad,videovigilancia,CCTV,monitoreo 24/7,SOC,NOC,soporte TI,mantenimiento TI,videocolaboración,audioconferencia,automatización de espacios,arrendamiento tecnológico,leasing,financiamiento,ataque,ransomware,mañana,pasado mañana,tarde,nombre,hora">
     <Say voice="${escapeXml(options.voice)}" language="${escapeXml(options.language)}">${escapeXml(options.message)}</Say>
   </Gather>
 </Response>`;

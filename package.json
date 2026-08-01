@@ -1,7 +1,7 @@
 {
   "name": "agentica",
-  "version": "1.0.0",
-  "description": "Agentica voice appointment agent on Cloudflare Workers, Durable Objects, Workers AI, and Twilio.",
+  "version": "1.1.0",
+  "description": "Agentica voice lead qualification agent for Alta Sistemas on Cloudflare Workers, Durable Objects, Workers AI, and Twilio.",
   "private": true,
   "scripts": {
     "dev": "wrangler dev",

@@ -1,5 +1,6 @@
 import { extractSlots } from "./ai/slot-extractor";
 import { VoiceAgent } from "./durable-objects/voice-agent";
+import { renderHelpPage } from "./help-page";
 import { parseTwilioVoiceBody, readVerifiedTwilioBody } from "./twilio/request";
 import { twimlGather, twimlSayAndHangup } from "./twilio/twiml";
 
@@ -12,6 +13,10 @@ export default {
     try {
       if (url.pathname === "/health") {
         return Response.json({ ok: true, service: "agentica-voice" });
+      }
+
+      if ((request.method === "GET" || request.method === "HEAD") && (url.hostname === "help.angaflow.mx" || url.pathname === "/docs")) {
+        return renderHelpPage();
       }
 
       if (request.method === "POST" && url.pathname === "/webhook/voice") {
@@ -34,7 +39,7 @@ export default {
 
       if (url.pathname.startsWith("/webhook/voice")) {
         return twimlSayAndHangup(
-          "Lo siento, ocurrió un problema técnico. Por favor intenta de nuevo más tarde.",
+          "Lo siento, ocurrió un problema técnico. Por favor intenta de nuevo más tarde o comunícate con Alta Sistemas por otro canal.",
           env.LANGUAGE,
           env.VOICE,
         );
@@ -54,7 +59,7 @@ async function handleIncomingCall(request: Request, env: Env): Promise<Response>
 
   return twimlGather({
     action: "/webhook/voice/process",
-    message: `Hola, gracias por llamar a ${env.BUSINESS_NAME}. Soy ${env.ASSISTANT_NAME}. Te ayudo con tu cita. Para empezar, ¿me regalas tu nombre?`,
+    message: `Gracias por llamar a ${env.BUSINESS_NAME}, soluciones tecnológicas inteligentes para la operación de negocios mexicanos. Soy ${env.ASSISTANT_NAME}. Te ayudo a canalizar tu solicitud con un especialista. Para empezar, ¿me regalas tu nombre?`,
     language: env.LANGUAGE,
     voice: env.VOICE,
   });
@@ -95,7 +100,7 @@ async function handleVoiceTurn(request: Request, env: Env): Promise<Response> {
 
 function retryPrompt(dialogState: string): string {
   if (dialogState === "confirming") {
-    return "Perdón, no te escuché bien. Solo dime sí para confirmar, o no para corregir.";
+    return "Perdón, no te escuché bien. Solo dime sí para confirmar la solicitud, o no para corregir.";
   }
 
   return "Perdón, no te escuché bien. ¿Me lo repites un poco más despacio?";

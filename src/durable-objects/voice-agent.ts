@@ -216,7 +216,7 @@ export class VoiceAgent extends DurableObject<Env> {
     if (currentState === "confirming") {
       if (isAffirmative(userMessage) && missingSlots.length === 0) {
         return {
-          responseText: "Listo, quedó agendada. Te esperamos. Que tengas bonito día.",
+          responseText: "Listo, quedó registrada tu solicitud. Un especialista de Alta Sistemas dará seguimiento para ayudarte con una propuesta tecnológica integral para tu operación. Que tengas buen día.",
           dialogState: "booked",
           missingSlots,
           isComplete: true,
@@ -225,7 +225,7 @@ export class VoiceAgent extends DurableObject<Env> {
 
       if (isNegative(userMessage)) {
         return {
-          responseText: "Claro, sin problema. ¿Qué quieres cambiar: el nombre, el día, la hora o el motivo?",
+          responseText: "Claro, sin problema. ¿Qué quieres cambiar: el nombre, el día, la hora o el tema de la solicitud?",
           dialogState: "collecting_info",
           missingSlots,
           isComplete: false,
@@ -235,7 +235,7 @@ export class VoiceAgent extends DurableObject<Env> {
 
     if (missingSlots.length === 0) {
       return {
-        responseText: `Perfecto. Tengo registrada una cita para ${slots.nombre_cliente}, ${formatDateTimeForSpeech(slots.fecha_hora)}, por ${slots.motivo}. ¿Es correcto?`,
+        responseText: `Perfecto. Tengo registrada una asesoría para ${slots.nombre_cliente}, ${formatDateTimeForSpeech(slots.fecha_hora)}, sobre ${slots.motivo}. La idea es revisar una solución tecnológica inteligente y adecuada para tu operación. ¿Es correcto?`,
         dialogState: "confirming",
         missingSlots,
         isComplete: false,
@@ -293,8 +293,8 @@ function mergeSlots(current: ConversationSlots, incoming: Partial<ConversationSl
 function getMissingSlots(slots: ConversationSlots): (keyof ConversationSlots)[] {
   const missing: (keyof ConversationSlots)[] = [];
   if (!slots.nombre_cliente) missing.push("nombre_cliente");
-  if (!slots.fecha_hora) missing.push("fecha_hora");
   if (!slots.motivo) missing.push("motivo");
+  if (!slots.fecha_hora) missing.push("fecha_hora");
   return missing;
 }
 
@@ -303,9 +303,9 @@ function promptForSlot(slot: keyof ConversationSlots, slots: ConversationSlots):
     case "nombre_cliente":
       return "¿Me regalas tu nombre, por favor?";
     case "fecha_hora":
-      return `${slots.nombre_cliente ? `Gracias, ${slots.nombre_cliente}. ` : ""}¿Qué día y a qué hora te gustaría venir? Por ejemplo, mañana a las cuatro de la tarde.`;
+      return "Gracias. ¿Qué día y a qué hora te gustaría que te contacte un especialista de Alta Sistemas? Por ejemplo, mañana a las cuatro de la tarde.";
     case "motivo":
-      return "Perfecto. ¿Qué necesitas hacerte? Puede ser limpieza, revisión, dolor, o algo diferente.";
+      return `${slots.nombre_cliente ? `Gracias, ${slots.nombre_cliente}. ` : ""}¿Sobre qué servicio estás interesado? Podemos ayudarte con cómputo y DaaS, servidores y nube OnPremise, redes y ciberseguridad, SOC y NOC 24/7, videocolaboración y automatización, o arrendamiento tecnológico.`;
     case "telefono":
       return "¿Me compartes tu número de teléfono?";
   }

@@ -8,6 +8,10 @@
     {
       "pattern": "agentica.angaflow.mx",
       "custom_domain": true
+    },
+    {
+      "pattern": "help.angaflow.mx",
+      "custom_domain": true
     }
   ],
   "observability": {
@@ -38,8 +42,8 @@
     }
   ],
   "vars": {
-    "ASSISTANT_NAME": "Sofía",
-    "BUSINESS_NAME": "Clínica Dental Smile",
+    "ASSISTANT_NAME": "Tania Duran",
+    "BUSINESS_NAME": "Alta Sistemas",
     "LANGUAGE": "es-MX",
     "VOICE": "Polly.Mia-Neural",
     "TIME_ZONE": "America/Mexico_City",
