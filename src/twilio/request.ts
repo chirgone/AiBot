@@ -38,12 +38,25 @@ export function parseTwilioVoiceBody(body: string): TwilioVoiceRequest {
 
   return {
     callSid,
-    from: params.get("From") ?? "unknown",
-    to: params.get("To") ?? "unknown",
+    from: normalizePhone(params.get("From") ?? "unknown"),
+    to: normalizePhone(params.get("To") ?? "unknown"),
     speechResult: params.get("SpeechResult")?.trim() ?? "",
     confidence: Number.isFinite(parsedConfidence) ? parsedConfidence : undefined,
     digits: params.get("Digits") ?? undefined,
   };
+}
+
+// URLSearchParams decodifica el `+` como espacio (application/x-www-form-urlencoded
+// espec.). Twilio manda el n\u00famero como `+18454090168`; si el cliente o
+// proxy no escap\u00f3 el `+` como `%2B`, llega como ` 18454090168`.
+// Normalizamos: quitamos espacios y anteponemos `+` si el string es
+// s\u00f3lo d\u00edgitos (E.164 always starts con +).
+function normalizePhone(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "unknown") return trimmed;
+  if (trimmed.startsWith("+")) return trimmed;
+  if (/^\d{7,}$/.test(trimmed)) return `+${trimmed}`;
+  return trimmed;
 }
 
 async function verifyTwilioSignature(

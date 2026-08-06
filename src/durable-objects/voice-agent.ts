@@ -302,23 +302,11 @@ export class VoiceAgent extends DurableObject<Env> {
       };
     }
 
-    // Prioridad 1: match directo con un servicio conocido (r\u00e1pido, sin AI).
-    const knowledgeAnswer = answerKnowledgeQuestion(userMessage, runtimeConfig);
-    if (knowledgeAnswer) {
-      const inferredService = knowledgeAnswer.serviceName;
-      const nextPrompt = nextPromptAfterKnowledge({ ...slots, motivo: slots.motivo ?? inferredService }, runtimeConfig);
-      return {
-        responseText: limitVoiceText(`${knowledgeAnswer.responseText} ${nextPrompt}`, 420),
-        dialogState: "collecting_info",
-        missingSlots: getMissingSlots({ ...slots, motivo: slots.motivo ?? inferredService }),
-        isComplete: false,
-      };
-    }
-
-    // Prioridad 2: RAG. El worker ya hizo la b\u00fasqueda y reformulaci\u00f3n; s\u00f3lo
-    // integramos la respuesta y retomamos el flujo pidiendo el siguiente slot.
-    // Marcamos estado 'answering_question' para el registro; el siguiente
-    // turno vuelve a collecting_info porque los slots faltantes no cambiaron.
+    // Prioridad 1: RAG. Si el mensaje huele a pregunta de conocimiento y
+    // el worker ya trajo respuesta, la usamos ANTES de aceptar cualquier
+    // extracci\u00f3n de motivo que el slot-extractor haya hecho del mismo
+    // mensaje. Sin esto, "cu\u00e9ntame de la membres\u00eda" se aceptar\u00eda como
+    // motivo=membres\u00eda y el bot saltar\u00eda a pedir fecha sin responder.
     if (ragAnswer && looksLikeKnowledgeQuestion(userMessage)) {
       const missing = getMissingSlots(slots);
       const followUp = missing.length
@@ -328,6 +316,19 @@ export class VoiceAgent extends DurableObject<Env> {
         responseText: limitVoiceText(`${ragAnswer.answer}${followUp}`, 420),
         dialogState: "answering_question",
         missingSlots: missing,
+        isComplete: false,
+      };
+    }
+
+    // Prioridad 2: match directo con un servicio conocido (r\u00e1pido, sin AI).
+    const knowledgeAnswer = answerKnowledgeQuestion(userMessage, runtimeConfig);
+    if (knowledgeAnswer) {
+      const inferredService = knowledgeAnswer.serviceName;
+      const nextPrompt = nextPromptAfterKnowledge({ ...slots, motivo: slots.motivo ?? inferredService }, runtimeConfig);
+      return {
+        responseText: limitVoiceText(`${knowledgeAnswer.responseText} ${nextPrompt}`, 420),
+        dialogState: "collecting_info",
+        missingSlots: getMissingSlots({ ...slots, motivo: slots.motivo ?? inferredService }),
         isComplete: false,
       };
     }
