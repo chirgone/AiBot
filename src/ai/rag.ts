@@ -39,10 +39,16 @@ const EMBEDDING_TIMEOUT_MS = 1500;
 // contexto \u00fatil y latencia/tokens.
 const TOP_K = 3;
 
-// Score m\u00ednimo para considerar un match de Vectorize. bge-m3 con
-// coseno t\u00edpicamente arroja 0.55+ para matches buenos. Debajo de 0.4
-// es ruido y ca\u00edmos a FTS5.
-const VECTORIZE_MIN_SCORE = 0.4;
+// Score m\u00ednimo para considerar un match de Vectorize confiable. bge-m3
+// con coseno t\u00edpicamente arroja 0.55+ para matches buenos. Debajo de 0.5
+// el LLM tiende a alucinar rellenando el contexto d\u00e9bil.
+const VECTORIZE_MIN_SCORE = 0.5;
+
+// Score m\u00ednimo global para invocar al LLM reformulador. Por debajo de
+// esto, aunque tengamos fragments (via FTS5 o LIKE d\u00e9bil), preferimos
+// responder honestamente con "no tengo ese dato" que arriesgar
+// alucinaciones. Se aplica en answerFromContext.
+const MIN_SCORE_FOR_ANSWER = 0.3;
 
 export async function searchKnowledgeContext(
   env: Env,
@@ -122,6 +128,25 @@ export async function answerFromContext(
 ): Promise<RagAnswer | undefined> {
   if (!fragments.length) return undefined;
 
+  // Si el mejor fragment tiene score muy bajo, devolvemos la respuesta
+  // honesta de "no tengo ese dato" para evitar que el LLM invente sobre
+  // contexto irrelevante. Esta es la barrera anti-alucinaci\u00f3n.
+  const bestScore = fragments[0].score;
+  if (bestScore < MIN_SCORE_FOR_ANSWER) {
+    console.log(
+      JSON.stringify({
+        message: "rag: score too low, returning honest fallback",
+        bestScore,
+        threshold: MIN_SCORE_FOR_ANSWER,
+      }),
+    );
+    return {
+      answer: "No tengo ese dato exacto, pero un compa\u00f1ero del equipo puede confirm\u00e1rtelo. \u00bfTe interesa que te contacten?",
+      fragments,
+      origin: fragments[0].origin,
+    };
+  }
+
   const contextText = fragments
     .slice(0, TOP_K)
     .map((fragment, index) => `[${index + 1}] ${fragment.title ?? "Sitio"}: ${fragment.summary.slice(0, 400)}`)
@@ -134,19 +159,22 @@ export async function answerFromContext(
           {
             role: "system",
             content: `Eres el asistente de voz de ${config.businessName}. Responde en espa\u00f1ol de M\u00e9xico, en UNA SOLA oraci\u00f3n breve, natural y directa, apta para leerse en voz alta.
-Reglas:
-- M\u00e1ximo 30 palabras. Sin listas, sin markdown, sin puntos y coma.
-- Bas\u00e1ndote SOLO en el CONTEXTO. Si el contexto no responde, di exactamente: "No tengo ese dato exacto, pero puedo pedirle al equipo que te confirme."
-- No inventes precios, tel\u00e9fonos, horarios ni promociones que no est\u00e9n en el contexto.
-- No menciones "seg\u00fan el sitio" ni "seg\u00fan la informaci\u00f3n". Habla como si supieras.
-- Termina con un cierre natural que invite a seguir la conversaci\u00f3n.`,
+
+REGLAS ABSOLUTAS (violarlas es un error grave):
+1. Solo puedes afirmar hechos que APAREZCAN LITERALMENTE en el CONTEXTO. Nada m\u00e1s.
+2. Si la pregunta del cliente NO puede responderse con el contexto dado, responde EXACTAMENTE con esta frase y nada m\u00e1s: "No tengo ese dato exacto, pero un compa\u00f1ero del equipo puede confirm\u00e1rtelo. \u00bfTe interesa que te contacten?"
+3. PROHIBIDO inventar nombres propios (restaurantes, personas, marcas, lugares) que no est\u00e9n en el contexto.
+4. PROHIBIDO inventar precios, tel\u00e9fonos, horarios, direcciones, promociones o disponibilidad.
+5. M\u00e1ximo 30 palabras. Sin listas, sin markdown.
+6. No digas "seg\u00fan el sitio" ni "seg\u00fan la informaci\u00f3n"; habla natural.
+7. Si respondes con datos del contexto, cierra con una pregunta breve que ayude al cliente a avanzar.`,
           },
           {
             role: "user",
-            content: `CONTEXTO:\n${contextText}\n\nPREGUNTA DEL CLIENTE: ${userQuestion}\n\nResponde en una oraci\u00f3n breve.`,
+            content: `CONTEXTO (\u00fanica fuente v\u00e1lida de datos):\n${contextText}\n\nPREGUNTA DEL CLIENTE: ${userQuestion}\n\nAplica las REGLAS ABSOLUTAS. Responde en una sola oraci\u00f3n.`,
           },
         ],
-        temperature: 0.3,
+        temperature: 0.1,
         max_tokens: 128,
       }),
       timeout<unknown>(LLM_TIMEOUT_MS, "llm"),
@@ -302,12 +330,14 @@ async function ftsSearch(env: Env, tenantId: string, query: string): Promise<Kno
 }
 
 async function likeSearch(env: Env, tenantId: string, query: string): Promise<KnowledgeFragment[]> {
+  // Filtramos stopwords para no buscar por "puedes", "quiero", etc. que
+  // matchean cualquier p\u00e1gina y contaminan el contexto.
   const tokens = query
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .split(/\s+/)
-    .filter((token) => token.length >= 4)
+    .filter((token) => token.length >= 4 && !STOPWORDS.has(token))
     .slice(0, 3);
   if (!tokens.length) return [];
 
