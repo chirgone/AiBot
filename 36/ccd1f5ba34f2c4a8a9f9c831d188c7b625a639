@@ -1,0 +1,37 @@
+migrations/0005_rag_knowledge.sql
+  s_951cf48e08fd97::t_2778a602bd76f0 1-63
+package.json
+  s_951cf48e08fd97::t_77cc07a88d67fe 3
+src/admin-api.ts
+  s_951cf48e08fd97::t_36ba1d9011fc0d 2,529-541,609,628-633,645-653,663,667,670-675,683,687-727,776,802,815,827,836-837,850
+src/admin-page.ts
+  s_951cf48e08fd97::t_2a946160819323 462
+src/ai/rag.ts
+  s_951cf48e08fd97::t_e5eb81299bbd82 1-414
+src/durable-objects/voice-agent.ts
+  s_951cf48e08fd97::t_4ed7f3450ed4a5 16-24,43,74-75,79-80,85-87,125,133-135,152,175-184,187,197,255,294,305,318-334
+src/index.ts
+  s_951cf48e08fd97::t_2dff0c3b2bbba5 2,10-11,137-147,150,206-254
+src/runtime-config.ts
+  s_951cf48e08fd97::t_12e9a86171c1d3 67-68,77,146,257,322
+src/types.ts
+  s_951cf48e08fd97::t_1e9bcb1756f435 3,5,53
+wrangler.jsonc
+  s_951cf48e08fd97::t_1d4a7bb2bfd3bd 50-55,69,72-73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "36ccd1f5ba34f2c4a8a9f9c831d188c7b625a639",
+  "prompts": {},
+  "sessions": {
+    "s_951cf48e08fd97": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_069315609ffeNWss1vxP3W35A8",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Ivan Anguiano <jose301184@gmail.com>"
+    }
+  }
+}
