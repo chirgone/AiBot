@@ -1215,13 +1215,35 @@ function adminHtml(email: string): string {
         if (!hasTenant()) return;
         const tenant = currentTenant();
         if (!tenant) return;
-        if (!confirm('¿Borrar el negocio "' + tenant.name + '" y todos sus flujos, fuentes, servicios y prospectos?')) return;
+
+        // Doble confirmaci\u00f3n. Primero el aviso general, luego pide
+        // escribir el nombre EXACTO. Esto evita clicks accidentales
+        // y match el requisito del backend (body.confirm === tenant.name).
+        const warn = '¿Seguro que quieres borrar "' + tenant.name + '"?\\n\\n' +
+          '• El negocio dejar\u00e1 de responder llamadas.\\n' +
+          '• Su n\u00famero quedar\u00e1 disponible para reasignar.\\n' +
+          '• Se PRESERVAN prospectos, flujos y conocimiento.\\n' +
+          '• Podr\u00e1s restaurarlo desde el panel.';
+        if (!confirm(warn)) return;
+
+        const typed = prompt(
+          'Para confirmar, escribe el nombre exacto del negocio:\\n\\n' + tenant.name,
+        );
+        if (typed === null) return;
+        if (typed.trim() !== tenant.name) {
+          showNotice('tenantResult', 'El nombre no coincide. Borrado cancelado.', 'danger');
+          return;
+        }
+
         setBusy('deleteTenant', true, 'Borrando...');
         showNotice('tenantResult', 'Borrando negocio...', 'warn');
         const deletedId = state.tenantId;
         try {
-          await api('tenants/' + deletedId, { method: 'DELETE' });
-          showNotice('tenantResult', 'Negocio borrado.', 'ok');
+          await api('tenants/' + deletedId, {
+            method: 'DELETE',
+            body: JSON.stringify({ confirm: tenant.name }),
+          });
+          showNotice('tenantResult', 'Negocio borrado. Se puede restaurar desde el panel de negocios borrados.', 'ok');
           state.tenantId = null;
           await load();
         } catch (error) {

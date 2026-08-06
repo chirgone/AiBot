@@ -1,0 +1,21 @@
+-- 0006: soft delete de tenants
+--
+-- Antes: DELETE /admin/tenants/{id} ejecutaba 8 DELETE en cascada y
+-- perd\u00edamos flows, leads, knowledge y contactos. Auditor\u00eda preservada
+-- pero cero manera de recuperar.
+--
+-- Ahora:
+--   - status='deleted' marca el tenant como borrado l\u00f3gicamente.
+--   - deleted_at timestamp para auditor\u00eda y retenci\u00f3n.
+--   - resolveRuntimeConfig ya filtra por status='active', as\u00ed que
+--     un tenant deleted NO responde llamadas.
+--   - tenant_channels se desactiva con status='deleted' para liberar
+--     el n\u00famero (UNIQUE(channel, address) permite reasignarlo despu\u00e9s).
+--   - Hard delete sigue disponible como endpoint separado y borra
+--     D1 + Vectorize.
+--
+-- Idempotente: ADD COLUMN falla si ya existe, por eso el migrator
+-- lo llama con try/catch en 0005 pattern. Aqu\u00ed usamos el approach
+-- de PRAGMA table_info que el DO usa.
+
+ALTER TABLE tenants ADD COLUMN deleted_at INTEGER;

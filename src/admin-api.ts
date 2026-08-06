@@ -99,11 +99,18 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
   }
 
   if (request.method === "GET" && path === "tenants") {
+    // ?include=deleted expone tenants soft-deleted para el panel de
+    // recuperaci\u00f3n. Por defecto s\u00f3lo mostramos los que NO est\u00e1n
+    // borrados l\u00f3gicamente.
+    const includeDeleted = url.searchParams.get("include") === "deleted";
+    const whereClause = includeDeleted ? "" : "WHERE t.status != 'deleted'";
     const tenants = await env.DB.prepare(
       `SELECT t.id, t.name, t.slug, t.vertical, t.country, t.timezone, t.language, t.status, t.solution_type, t.website,
+              t.deleted_at,
               tc.address AS voice_number
          FROM tenants t
          LEFT JOIN tenant_channels tc ON tc.tenant_id = t.id AND tc.channel = 'voice' AND tc.status = 'active'
+         ${whereClause}
         ORDER BY t.created_at DESC`,
     ).all<TenantRow>();
     return json({ tenants: tenants.results ?? [] });
@@ -165,7 +172,7 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
     return json({ ok: true, tenantId });
   }
 
-  const tenantMatch = path.match(/^tenants\/([^/]+)(?:\/(services|sources|flow|leads|scan|publish))?$/);
+  const tenantMatch = path.match(/^tenants\/([^/]+)(?:\/(services|sources|flow|leads|scan|publish|restore|purge))?$/);
   if (!tenantMatch) {
     return json({ error: "Not found" }, 404);
   }
@@ -264,15 +271,150 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
     return json({ ok: true });
   }
 
+  // Soft delete: marca tenant como deleted, desactiva channels (libera
+  // el n\u00famero para reasignaci\u00f3n), preserva flows, leads, knowledge y
+  // audit. Recuperable con POST /tenants/{id}/restore.
+  //
+  // Requiere confirmaci\u00f3n escrita en body { "confirm": "<nombre exacto>" }
+  // para evitar borrados accidentales v\u00eda API.
   if (request.method === "DELETE" && !action) {
-    const existing = await env.DB.prepare("SELECT id, name FROM tenants WHERE id = ?")
+    const existing = await env.DB.prepare("SELECT id, name, status FROM tenants WHERE id = ?")
       .bind(tenantId)
-      .first<{ id: string; name: string }>();
+      .first<{ id: string; name: string; status: string }>();
     if (!existing) {
       return json({ error: "Tenant not found" }, 404);
     }
+    if (existing.status === "deleted") {
+      return json({ error: "Tenant already deleted" }, 409);
+    }
 
-    await audit(env, tenantId, identity.email, "tenant.delete", { name: existing.name });
+    const body = (await request.json().catch(() => ({}))) as { confirm?: string };
+    if (!body.confirm || body.confirm.trim() !== existing.name) {
+      return json({
+        error: "Confirmation required",
+        message: `Env\u00eda { \"confirm\": \"${existing.name}\" } para confirmar el borrado.`,
+      }, 400);
+    }
+
+    await audit(env, tenantId, identity.email, "tenant.soft_delete", { name: existing.name });
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE tenants SET status = 'deleted', deleted_at = strftime('%s','now'), updated_at = strftime('%s','now') WHERE id = ?",
+      ).bind(tenantId),
+      env.DB.prepare(
+        "UPDATE tenant_channels SET status = 'deleted' WHERE tenant_id = ?",
+      ).bind(tenantId),
+      env.DB.prepare(
+        "UPDATE agent_flows SET status = 'draft' WHERE tenant_id = ? AND status = 'active'",
+      ).bind(tenantId),
+    ]);
+    return json({ ok: true, softDeletedTenantId: tenantId, restorable: true });
+  }
+
+  // Restore: devuelve el tenant a status='active' y reactiva su channel.
+  // Requiere que el n\u00famero no est\u00e9 tomado por otro tenant activo.
+  if (request.method === "POST" && action === "restore") {
+    const existing = await env.DB.prepare("SELECT id, name, status FROM tenants WHERE id = ?")
+      .bind(tenantId)
+      .first<{ id: string; name: string; status: string }>();
+    if (!existing) {
+      return json({ error: "Tenant not found" }, 404);
+    }
+    if (existing.status !== "deleted") {
+      return json({ error: "Tenant is not deleted" }, 409);
+    }
+
+    // Verificar que el n\u00famero del tenant no est\u00e9 tomado por otro activo.
+    const conflictingChannel = await env.DB.prepare(
+      `SELECT tc.address, t.name AS holder_name
+         FROM tenant_channels tc
+         JOIN tenants t ON t.id = tc.tenant_id
+        WHERE tc.tenant_id = ?
+          AND tc.channel = 'voice'
+          AND EXISTS (
+            SELECT 1 FROM tenant_channels tc2
+             JOIN tenants t2 ON t2.id = tc2.tenant_id
+            WHERE tc2.channel = 'voice'
+              AND tc2.address = tc.address
+              AND tc2.status = 'active'
+              AND t2.status = 'active'
+              AND tc2.tenant_id != tc.tenant_id
+          )
+        LIMIT 1`,
+    ).bind(tenantId).first<{ address: string; holder_name: string }>();
+    if (conflictingChannel) {
+      return json({
+        error: "Channel conflict",
+        message: `El n\u00famero ${conflictingChannel.address} lo tiene ${conflictingChannel.holder_name}. Cambia el n\u00famero de aquel primero.`,
+      }, 409);
+    }
+
+    await audit(env, tenantId, identity.email, "tenant.restore", { name: existing.name });
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE tenants SET status = 'active', deleted_at = NULL, updated_at = strftime('%s','now') WHERE id = ?",
+      ).bind(tenantId),
+      env.DB.prepare(
+        "UPDATE tenant_channels SET status = 'active' WHERE tenant_id = ? AND status = 'deleted'",
+      ).bind(tenantId),
+    ]);
+    return json({ ok: true, restoredTenantId: tenantId });
+  }
+
+  // Hard delete (purge): borrado permanente de D1 + Vectorize.
+  // S\u00f3lo permitido si el tenant est\u00e1 previamente soft-deleted.
+  // Requiere confirmaci\u00f3n escrita del nombre exacto.
+  if (request.method === "DELETE" && action === "purge") {
+    const existing = await env.DB.prepare("SELECT id, name, status FROM tenants WHERE id = ?")
+      .bind(tenantId)
+      .first<{ id: string; name: string; status: string }>();
+    if (!existing) {
+      return json({ error: "Tenant not found" }, 404);
+    }
+    if (existing.status !== "deleted") {
+      return json({
+        error: "Must soft-delete first",
+        message: "Borra el negocio (soft delete) antes de purgarlo permanentemente.",
+      }, 409);
+    }
+
+    const body = (await request.json().catch(() => ({}))) as { confirm?: string };
+    if (!body.confirm || body.confirm.trim() !== existing.name) {
+      return json({
+        error: "Confirmation required",
+        message: `Env\u00eda { \"confirm\": \"${existing.name}\" } para purgar permanentemente.`,
+      }, 400);
+    }
+
+    // 1. Limpieza de Vectorize antes de borrar knowledge_sources.
+    // Recolectamos IDs para deleteByIds. Si Vectorize falla, seguimos
+    // (los vectores quedar\u00e1n hu\u00e9rfanos pero el D1 borra bien).
+    let vectorsDeleted = 0;
+    try {
+      const sources = await env.DB.prepare(
+        "SELECT id FROM knowledge_sources WHERE tenant_id = ?",
+      ).bind(tenantId).all<{ id: string }>();
+      const ids = (sources.results ?? []).map((r) => r.id);
+      if (ids.length > 0 && env.VECTORIZE) {
+        // Vectorize permite hasta 1000 IDs por deleteByIds; loopeamos por si acaso.
+        for (let i = 0; i < ids.length; i += 1000) {
+          const batch = ids.slice(i, i + 1000);
+          await env.VECTORIZE.deleteByIds(batch);
+          vectorsDeleted += batch.length;
+        }
+      }
+    } catch (error) {
+      console.error({
+        message: "tenant.purge: vectorize cleanup failed",
+        tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    await audit(env, tenantId, identity.email, "tenant.purge", {
+      name: existing.name,
+      vectorsDeleted,
+    });
     await env.DB.batch([
       env.DB.prepare("DELETE FROM flow_steps WHERE flow_id IN (SELECT id FROM agent_flows WHERE tenant_id = ?)").bind(tenantId),
       env.DB.prepare("DELETE FROM agent_flows WHERE tenant_id = ?").bind(tenantId),
@@ -283,7 +425,7 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
       env.DB.prepare("DELETE FROM tenant_channels WHERE tenant_id = ?").bind(tenantId),
       env.DB.prepare("DELETE FROM tenants WHERE id = ?").bind(tenantId),
     ]);
-    return json({ ok: true, deletedTenantId: tenantId });
+    return json({ ok: true, purgedTenantId: tenantId, vectorsDeleted });
   }
 
   if (request.method === "GET" && action === "services") {
@@ -470,7 +612,7 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
 }
 
 async function scanKnowledgeSources(env: Env, tenantId: string): Promise<{ ok: boolean; scanned: number; discovered: number; failed: number }> {
-  const maxPages = 40;
+  const maxPages = 150;
   const sources = await env.DB.prepare(
     `SELECT id, url
        FROM knowledge_sources
@@ -488,13 +630,55 @@ async function scanKnowledgeSources(env: Env, tenantId: string): Promise<{ ok: b
   let discovered = 0;
   let failed = 0;
 
+  // Bonus multi-vertical: si el sitio expone sitemap.xml, sembramos
+  // TODAS sus URLs antes de empezar el BFS. Esto garantiza cobertura
+  // en sitios con navegaci\u00f3n JS o men\u00fas complejos donde los <a href>
+  // no est\u00e1n en el HTML est\u00e1tico. Falla silente.
+  const seed = queue[0];
+  if (seed) {
+    try {
+      const origin = new URL(seed.url).origin;
+      const sitemapUrls = await tryReadSitemap(origin);
+      // Priorizamos URLs con vocabulario de alto valor semantico.
+      // El scanner ver\u00e1 primero contacto/servicios/producto/habitaci\u00f3n/
+      // reserva/etc. antes que blog y misc. Cubre todas las verticales.
+      const HIGH_VALUE = /contacto|contact|about|nosotros|quienes|servicio|servicios|solucion|soluci[oó]n|producto|productos|catalogo|cat[aá]logo|hotel|habitaci|cuarto|suite|room|tarifa|precio|price|reserva|reservation|destino|resort|amenidad|men[uú]|platillo|restaurant|especialidad|doctor|doctora|especialistas|clinica|cl[ií]nica|curso|programa|admisi[oó]n|carrera|tramite|tr[aá]mite|sucursal|ubicaci|location|faq|preguntas|soporte|support|paquete|membres[ií]a|beneficio|servicio-ciudadano/i;
+      const prioritized: string[] = [];
+      const rest: string[] = [];
+      for (const url of sitemapUrls) {
+        (HIGH_VALUE.test(url) ? prioritized : rest).push(url);
+      }
+      const ordered = [...prioritized, ...rest];
+      for (const url of ordered) {
+        const clean = canonicalizeUrl(url);
+        if (knownUrls.has(clean) || !isCrawlableUrl(clean)) continue;
+        const id = `source_${crypto.randomUUID()}`;
+        knownUrls.add(clean);
+        queue.push({ id, url: clean });
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO knowledge_sources (id, tenant_id, url, title, status)
+           VALUES (?, ?, ?, ?, 'pending')`,
+        )
+          .bind(id, tenantId, clean, "")
+          .run();
+        discovered += 1;
+        if (queue.length >= maxPages * 2) break;
+      }
+    } catch {
+      // sitemap.xml opcional \u2014 no bloqueamos scan si no existe
+    }
+  }
+
   while (queue.length && scanned + failed < maxPages) {
     const source = queue.shift();
     if (!source || visited.has(source.url) || !isCrawlableUrl(source.url)) continue;
     visited.add(source.url);
 
     try {
-      const response = await fetch(source.url, { cf: { cacheTtl: 300 } });
+      const response = await fetch(source.url, {
+        cf: { cacheTtl: 300 },
+        headers: { "user-agent": "Mozilla/5.0 AngaFlow-Scanner/1.0" },
+      });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const contentType = response.headers.get("content-type") ?? "";
       if (contentType && !/text\/html|application\/xhtml\+xml/i.test(contentType)) {
@@ -981,11 +1165,26 @@ function discoverCorporateLinks(html: string, baseUrl: string): Array<{ url: str
   return [...links.entries()].slice(0, 60).map(([url, title]) => ({ url, title }));
 }
 
+// Multi-tenant, multi-vertical: usamos denylist en vez de allowlist.
+// El allowlist previo estaba casado con vertical legal/B2B y romp\u00eda
+// hoteler\u00eda, salud, retail, educaci\u00f3n, gobierno, restaurantes, etc.
+// Ahora aceptamos toda ruta interna EXCEPTO basura obvia
+// (est\u00e1ticos, admin, avisos legales, feeds, taxonom\u00edas, i18n stubs).
 function isCorporatePath(pathname: string, label: string): boolean {
   const value = `${pathname} ${label}`.toLowerCase();
-  if (/wp-content|cdn-cgi|assets|static|image|img|css|js|fonts|login|admin|tag|author|category/.test(value)) return false;
-  if (/aviso|privacidad|privacy|terms|terminos|cookies|mapa|sitemap/.test(value)) return false;
-  return /servicio|servicios|solution|solutions|solucion|soluciones|producto|productos|platform|plataforma|nosotros|about|contacto|contact|faq|preguntas|soporte|support|industria|industries|vertical|quienes|somos|equipo|team|abogado|abogados|socio|socios|asociado|asociados|practica|práctica|practicas|prácticas|area|área|areas|áreas|derecho|legal|firma|experiencia|sectores|publicaciones|blog|noticias|casos|clientes/.test(value);
+  // Est\u00e1ticos y assets
+  if (/\/wp-content|\/wp-admin|\/wp-json|\/wp-includes|\/cdn-cgi|\/assets\/|\/static\/|\/dist\/|\/build\/|\/_next\/|\/_nuxt\/|\/node_modules\/|\/fonts?\/|\/images?\/|\/img\/|\/media\/|\/uploads\//.test(value)) return false;
+  // Autenticaci\u00f3n / admin
+  if (/\/login|\/logout|\/signin|\/signup|\/register|\/admin|\/dashboard|\/mi-cuenta|\/my-account|\/checkout|\/carrito|\/cart|\/wishlist/.test(value)) return false;
+  // Legales / boilerplate
+  if (/aviso-de-privacidad|aviso-privacidad|politica-de-privacidad|privacy-policy|privacy|terms|terminos|t[eé]rminos-y-condiciones|cookies?|sitemap|mapa-del-sitio|robots\.txt|copyright|derechos-reservados/.test(value)) return false;
+  // Feeds y taxonom\u00edas de blog
+  if (/\/feed\/?$|\/rss|\/atom|\/tag\/|\/tags\/|\/author\/|\/category\/|\/categoria\/|\/categor[ií]as\//.test(value)) return false;
+  // Redes sociales externas embebidas como links internos falsos
+  if (/facebook\.com|twitter\.com|x\.com|instagram\.com|linkedin\.com|youtube\.com|tiktok\.com|whatsapp\.com/.test(value)) return false;
+  // Placeholders comunes
+  if (/^\/#|javascript:|mailto:|tel:/.test(value)) return false;
+  return true;
 }
 
 function isLikelyServiceUrl(url: string): boolean {
@@ -1019,6 +1218,49 @@ function canonicalizeUrl(value: string): string {
     url.pathname = url.pathname.replace(/\/+$/, "");
   }
   return url.toString();
+}
+
+// Lee /sitemap.xml y /sitemap_index.xml (recursivo un nivel).
+// Extrae URLs de <loc> tags. L\u00edmite 500 URLs para evitar sitios enormes.
+async function tryReadSitemap(origin: string): Promise<string[]> {
+  const candidates = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`];
+  const collected: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      // Algunos sitios (ej. Cloudflare-protected) devuelven 403 pero
+      // igual sirven el XML. Aceptamos el body si parece XML v\u00e1lido.
+      const response = await fetch(candidate, {
+        cf: { cacheTtl: 300 },
+        headers: { "user-agent": "Mozilla/5.0 AngaFlow-Scanner/1.0" },
+      });
+      const xml = await response.text();
+      if (!/<urlset|<sitemapindex|<loc>/i.test(xml)) continue;
+      const locs = [...xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)].map((m) => m[1]);
+      for (const loc of locs) {
+        if (collected.length >= 500) break;
+        // Si el loc apunta a otro sitemap (index), lo seguimos un nivel.
+        if (/\.xml(\?|$)/i.test(loc) && collected.length < 400) {
+          try {
+            const sub = await fetch(loc, {
+              cf: { cacheTtl: 300 },
+              headers: { "user-agent": "Mozilla/5.0 AngaFlow-Scanner/1.0" },
+            });
+            const subXml = await sub.text();
+            if (/<loc>/i.test(subXml)) {
+              const subLocs = [...subXml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)].map((m) => m[1]);
+              collected.push(...subLocs.filter((u) => !/\.xml(\?|$)/i.test(u)));
+            }
+          } catch { /* skip */ }
+        } else {
+          collected.push(loc);
+        }
+      }
+      if (collected.length > 0) break;
+    } catch {
+      continue;
+    }
+  }
+  return collected.slice(0, 500);
 }
 
 function isCrawlableUrl(value: string): boolean {
