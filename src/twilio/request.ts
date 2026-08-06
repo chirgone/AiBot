@@ -32,7 +32,7 @@ export async function readVerifiedTwilioBody(request: Request, env: Env): Promis
 
 export function parseTwilioVoiceBody(body: string): TwilioVoiceRequest {
   const params = new URLSearchParams(body);
-  const callSid = required(params, "CallSid");
+  const callSid = params.get("CallSid") || `call_${crypto.randomUUID()}`;
 
   return {
     callSid,
@@ -124,12 +124,4 @@ function getRuntimeSecrets(env: Env): {
     TWILIO_AUTH_TOKEN: runtimeEnv.TWILIO_AUTH_TOKEN,
     SKIP_SIGNATURE_VALIDATION: runtimeEnv.SKIP_SIGNATURE_VALIDATION,
   };
-}
-
-function required(params: URLSearchParams, key: string): string {
-  const value = params.get(key);
-  if (!value) {
-    throw new Error(`Missing Twilio field: ${key}`);
-  }
-  return value;
 }

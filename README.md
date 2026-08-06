@@ -1,27 +1,60 @@
 # Agentica Voice MVP
 
-Agente telefónico de captura de solicitudes y asesorías para Alta Sistemas usando Cloudflare Workers, Durable Objects, Workers AI y Twilio. El guion está enfocado en una propuesta integral de tecnología para negocios mexicanos y soluciones tecnológicas inteligentes para la operación.
+Runtime conversacional multi-tenant para bots y agentes conversacionales usando Cloudflare Workers, D1, Durable Objects, Workers AI y Twilio. Alta Sistemas es el primer tenant/demo, pero la plataforma inicia de forma genérica por vertical, URL de negocio y fuentes corporativas escaneadas.
 
 ## Estado Actual
 
 - Worker desplegado: `agentica-voice`
 - Dominio: `https://agentica.angaflow.mx`
 - Documentación: `https://help.angaflow.mx`
+- Admin Studio: `https://admin.angaflow.mx`
+- D1: `agentica`
 - Health check: `https://agentica.angaflow.mx/health`
 - Twilio inbound webhook: `https://agentica.angaflow.mx/webhook/voice`
 - Voz actual: `Polly.Mia-Neural`
 - Idioma: `es-MX`
 - STT Twilio: `<Gather input="speech" speechTimeout="2" timeout="6">`
-- Asistente: `Tania Duran`
-- Negocio: `Alta Sistemas`
+- Plataforma base: `AngaFlow`
+- Tenant demo: `Alta Sistemas`
+- Asistente demo: `Tania Duran`
 - Seguridad temporal: `SKIP_SIGNATURE_VALIDATION="true"` para desbloquear el MVP. Rehabilitar validación de firma antes de producción.
 
 ## Stack
 
 - Cloudflare Worker: webhook HTTP para Twilio.
+- D1 `agentica`: configuración multi-tenant, tenants, servicios, fuentes, flows y leads.
 - Durable Object `VoiceAgent`: estado por llamada (`CallSid`) con SQLite.
 - Workers AI: extracción estructurada de slots en español.
 - Twilio Voice: número telefónico, `<Gather input="speech">`, STT/TTS y TwiML.
+
+## Admin Studio
+
+`admin.angaflow.mx` es la consola multi-tenant protegida por Cloudflare Access.
+
+Flujo de onboarding:
+
+1. Crear negocio.
+2. Seleccionar vertical.
+3. Cargar URL raíz del negocio.
+4. Escanear sitio y paths corporativos: servicios, soluciones, productos, nosotros, contacto, soporte y FAQs.
+5. Generar perfil de conocimiento, servicios detectados, keywords y flow conversacional inicial.
+6. Publicar versión activa del flujo.
+
+APIs iniciales:
+
+```bash
+GET  /api/admin/me
+GET  /api/admin/tenants
+POST /api/admin/tenants
+GET  /api/admin/tenants/:id
+GET  /api/admin/tenants/:id/services
+GET  /api/admin/tenants/:id/sources
+POST /api/admin/tenants/:id/sources
+POST /api/admin/tenants/:id/scan
+GET  /api/admin/tenants/:id/flow
+POST /api/admin/tenants/:id/publish
+GET  /api/admin/tenants/:id/leads
+```
 
 ## Setup
 

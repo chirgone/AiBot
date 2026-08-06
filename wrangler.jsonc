@@ -12,6 +12,10 @@
     {
       "pattern": "help.angaflow.mx",
       "custom_domain": true
+    },
+    {
+      "pattern": "admin.angaflow.mx",
+      "custom_domain": true
     }
   ],
   "observability": {
@@ -27,6 +31,14 @@
   "ai": {
     "binding": "AI"
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "agentica",
+      "database_id": "14703346-abde-4669-9e85-a238905d8af2",
+      "migrations_dir": "migrations"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
@@ -42,8 +54,8 @@
     }
   ],
   "vars": {
-    "ASSISTANT_NAME": "Tania Duran",
-    "BUSINESS_NAME": "Alta Sistemas",
+    "ASSISTANT_NAME": "Asistente AngaFlow",
+    "BUSINESS_NAME": "AngaFlow",
     "LANGUAGE": "es-MX",
     "VOICE": "Polly.Mia-Neural",
     "TIME_ZONE": "America/Mexico_City",

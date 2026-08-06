@@ -1,6 +1,9 @@
 import { extractSlots } from "./ai/slot-extractor";
+import { handleAdminApi, requireAdmin } from "./admin-api";
+import { renderAccessRequiredPage, renderAdminPage } from "./admin-page";
 import { VoiceAgent } from "./durable-objects/voice-agent";
 import { renderHelpPage } from "./help-page";
+import { recordConfirmedLead, resolveRuntimeConfig } from "./runtime-config";
 import { parseTwilioVoiceBody, readVerifiedTwilioBody } from "./twilio/request";
 import { twimlGather, twimlSayAndHangup } from "./twilio/twiml";
 
@@ -17,6 +20,21 @@ export default {
 
       if ((request.method === "GET" || request.method === "HEAD") && (url.hostname === "help.angaflow.mx" || url.pathname === "/docs")) {
         return renderHelpPage();
+      }
+
+      if (url.hostname === "admin.angaflow.mx" || url.pathname.startsWith("/api/admin")) {
+        const admin = requireAdmin(request);
+        if (admin instanceof Response) {
+          return url.pathname.startsWith("/api/admin") ? admin : renderAccessRequiredPage();
+        }
+
+        if (url.pathname.startsWith("/api/admin")) {
+          return await handleAdminApi(request, env, admin);
+        }
+
+        if (request.method === "GET" || request.method === "HEAD") {
+          return renderAdminPage(admin.email);
+        }
       }
 
       if (request.method === "POST" && url.pathname === "/webhook/voice") {
@@ -39,7 +57,7 @@ export default {
 
       if (url.pathname.startsWith("/webhook/voice")) {
         return twimlSayAndHangup(
-          "Lo siento, ocurrió un problema técnico. Por favor intenta de nuevo más tarde o comunícate con Alta Sistemas por otro canal.",
+          "Lo siento, ocurrió un problema técnico. Por favor intenta de nuevo más tarde o comunícate por otro canal.",
           env.LANGUAGE,
           env.VOICE,
         );
@@ -56,12 +74,14 @@ async function handleIncomingCall(request: Request, env: Env): Promise<Response>
   const stub = env.VOICE_AGENT.getByName(voiceRequest.callSid);
 
   await stub.initConversation(voiceRequest.callSid, voiceRequest.from);
+  const runtimeConfig = await resolveRuntimeConfig(env, voiceRequest.to);
 
   return twimlGather({
     action: "/webhook/voice/process",
-    message: `Gracias por llamar a ${env.BUSINESS_NAME}, soluciones tecnológicas inteligentes para la operación de negocios mexicanos. Soy ${env.ASSISTANT_NAME}. Te ayudo a canalizar tu solicitud con un especialista. Para empezar, ¿me regalas tu nombre?`,
-    language: env.LANGUAGE,
-    voice: env.VOICE,
+    message: withInitialQuestion(runtimeConfig.greeting, runtimeConfig.prompts.nombre_cliente),
+    language: runtimeConfig.language,
+    voice: runtimeConfig.voice,
+    hints: runtimeConfig.speechHints,
   });
 }
 
@@ -70,38 +90,60 @@ async function handleVoiceTurn(request: Request, env: Env): Promise<Response> {
   const voiceRequest = parseTwilioVoiceBody(body);
   const stub = env.VOICE_AGENT.getByName(voiceRequest.callSid);
   await stub.initConversation(voiceRequest.callSid, voiceRequest.from);
+  const runtimeConfig = await resolveRuntimeConfig(env, voiceRequest.to);
 
   const userMessage = voiceRequest.speechResult || voiceRequest.digits || "";
   if (!userMessage) {
     const context = await stub.getConversationContext(voiceRequest.callSid);
     return twimlGather({
       action: "/webhook/voice/process",
-      message: retryPrompt(context.dialogState),
-      language: env.LANGUAGE,
-      voice: env.VOICE,
+      message: retryPrompt(context.dialogState, runtimeConfig.fallbackMessage),
+      language: runtimeConfig.language,
+      voice: runtimeConfig.voice,
+      hints: runtimeConfig.speechHints,
     });
   }
 
   const context = await stub.getConversationContext(voiceRequest.callSid);
-  const slots = await extractSlots(env, userMessage, context);
-  const result = await stub.processTurn(voiceRequest.callSid, userMessage, slots);
+  const slots = await extractSlots(env, userMessage, context, runtimeConfig);
+  const result = await stub.processTurn(voiceRequest.callSid, userMessage, slots, runtimeConfig);
+  console.log(
+    JSON.stringify({
+      message: "voice turn",
+      callSid: voiceRequest.callSid,
+      state: result.dialogState,
+      complete: result.isComplete,
+      responseLength: result.responseText.length,
+      missingSlots: result.missingSlots,
+    }),
+  );
 
   if (result.isComplete) {
-    return twimlSayAndHangup(result.responseText, env.LANGUAGE, env.VOICE);
+    if (result.dialogState === "booked" && result.slots) {
+      await recordConfirmedLead(env, runtimeConfig, voiceRequest.callSid, voiceRequest.from, result.slots);
+    }
+
+    return twimlSayAndHangup(result.responseText, runtimeConfig.language, runtimeConfig.voice);
   }
 
   return twimlGather({
     action: "/webhook/voice/process",
     message: result.responseText,
-    language: env.LANGUAGE,
-    voice: env.VOICE,
+    language: runtimeConfig.language,
+    voice: runtimeConfig.voice,
+    hints: runtimeConfig.speechHints,
   });
 }
 
-function retryPrompt(dialogState: string): string {
+function withInitialQuestion(greeting: string, namePrompt?: string): string {
+  if (/\bnombre\b/i.test(greeting)) return greeting;
+  return `${greeting} ${namePrompt || "¿Me compartes tu nombre?"}`;
+}
+
+function retryPrompt(dialogState: string, fallbackMessage: string): string {
   if (dialogState === "confirming") {
     return "Perdón, no te escuché bien. Solo dime sí para confirmar la solicitud, o no para corregir.";
   }
 
-  return "Perdón, no te escuché bien. ¿Me lo repites un poco más despacio?";
+  return fallbackMessage;
 }

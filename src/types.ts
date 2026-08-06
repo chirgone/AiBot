@@ -26,6 +26,24 @@ export interface ProcessTurnResult {
   missingSlots: (keyof ConversationSlots)[];
   isComplete: boolean;
   appointmentId?: string;
+  slots?: ConversationSlots;
+}
+
+export interface RuntimePromptConfig {
+  tenantId: string;
+  businessName: string;
+  assistantName: string;
+  language: string;
+  voice: string;
+  timeZone: string;
+  greeting: string;
+  confirmationTemplate: string;
+  completionMessage: string;
+  fallbackMessage: string;
+  speechHints: string[];
+  prompts: Partial<Record<keyof ConversationSlots, string>>;
+  knowledgeSummary: string;
+  services: Array<{ name: string; description: string; keywords: string[] }>;
 }
 
 export interface TwilioVoiceRequest {

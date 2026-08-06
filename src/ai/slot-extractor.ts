@@ -1,4 +1,4 @@
-import type { ConversationContext, ConversationSlots } from "../types";
+import type { ConversationContext, ConversationSlots, RuntimePromptConfig } from "../types";
 
 interface SlotExtractionResponse {
   nombre_cliente: string | null;
@@ -34,6 +34,7 @@ export async function extractSlots(
   env: Env,
   userMessage: string,
   context: ConversationContext,
+  runtimeConfig?: RuntimePromptConfig,
 ): Promise<Partial<ConversationSlots>> {
   if (!userMessage.trim()) {
     return {};
@@ -44,10 +45,11 @@ export async function extractSlots(
       messages: [
         {
           role: "system",
-          content: `Eres un extractor de datos para registrar solicitudes de asesoría TI por teléfono en México para Alta Sistemas.
-Alta Sistemas ofrece una propuesta integral de tecnología para negocios mexicanos: Servicios Administrados de Cómputo y Device as a Service, Servidores y Nube OnPremise, Data Center, Almacenamiento y Virtualización, Redes, Ciberseguridad y Videovigilancia, SOC & NOC as a Service, Videocolaboración y Automatización de Espacios, y Arrendamiento Tecnológico Empresarial.
+          content: `Eres un extractor de datos para registrar solicitudes de asesoría por teléfono en México para ${runtimeConfig?.businessName ?? "Alta Sistemas"}.
+Contexto del negocio: ${runtimeConfig?.knowledgeSummary ?? "Alta Sistemas ofrece una propuesta integral de tecnología para negocios mexicanos: Servicios Administrados de Cómputo y Device as a Service, Servidores y Nube OnPremise, Data Center, Almacenamiento y Virtualización, Redes, Ciberseguridad y Videovigilancia, SOC & NOC as a Service, Videocolaboración y Automatización de Espacios, y Arrendamiento Tecnológico Empresarial."}
+Servicios conocidos: ${runtimeConfig?.services.map((service) => `${service.name}: ${service.description}`).join(" | ") ?? "Cómputo y DaaS, Servidores y Nube OnPremise, Redes, Ciberseguridad y Videovigilancia, SOC & NOC as a Service, Videocolaboración y Automatización, Arrendamiento Tecnológico"}.
 Hoy es ${new Date().toISOString()}.
-Zona horaria operativa: ${env.TIME_ZONE}.
+Zona horaria operativa: ${runtimeConfig?.timeZone ?? env.TIME_ZONE}.
 Reglas:
 - Extrae solo datos que el usuario dijo o confirmó.
 - Si el usuario dice mañana, pasado mañana, lunes, etc., normaliza a ISO 8601.
@@ -55,6 +57,8 @@ Reglas:
 - Si el usuario solo dice un día sin hora, responde null en fecha_hora.
 - Si falta un dato, responde null en ese campo.
 - No inventes teléfono si no aparece.
+- No uses nombres de personas como motivo. Si el mensaje solo parece un nombre, motivo debe ser null.
+- El motivo debe ser un servicio, área, problema o necesidad de negocio, no el nombre del cliente.
 - Responde solo con JSON válido conforme al schema.`,
         },
         {
@@ -125,12 +129,16 @@ function getNullableString(value: Record<string, unknown>, key: keyof SlotExtrac
 }
 
 function normalizeSlots(slots: SlotExtractionResponse): Partial<ConversationSlots> {
-  return {
+  const normalized = {
     nombre_cliente: clean(slots.nombre_cliente),
     telefono: clean(slots.telefono),
     fecha_hora: clean(slots.fecha_hora),
     motivo: clean(slots.motivo),
   };
+  if (normalized.nombre_cliente && normalized.motivo && sameNormalizedText(normalized.nombre_cliente, normalized.motivo)) {
+    normalized.motivo = undefined;
+  }
+  return normalized;
 }
 
 function fallbackExtractSlots(message: string): Partial<ConversationSlots> {
@@ -168,7 +176,7 @@ function withHeuristics(
   }
 
   const deterministicDateTime = inferRelativeDateTime(lower);
-  if (deterministicDateTime && !context.slots.fecha_hora) {
+  if (deterministicDateTime && (!context.slots.fecha_hora || isCorrection(lower) || context.dialogState === "confirming")) {
     enriched.fecha_hora = deterministicDateTime;
   }
 
@@ -179,7 +187,19 @@ function withHeuristics(
     }
   }
 
+  if (context.slots.motivo && isUrgentTiming(lower)) {
+    enriched.motivo = undefined;
+  }
+
   return enriched;
+}
+
+function isCorrection(lower: string): boolean {
+  return /\b(no|cambia|cambiar|corrige|corregir|mejor|otra hora|otro dia|otro día|seria|sería)\b/.test(lower);
+}
+
+function isUrgentTiming(lower: string): boolean {
+  return /\b(lo antes posible|cuanto antes|urgente|hoy mismo|en cuanto puedan|en cuanto sea posible|lo mas pronto|lo más pronto|pronto)\b/.test(lower);
 }
 
 function inferName(message: string): string | undefined {
@@ -226,11 +246,15 @@ function inferReason(lower: string): string | undefined {
   if (lower.includes("arrendamiento") || lower.includes("leasing") || lower.includes("financiamiento")) return "arrendamiento tecnológico con planes flexibles";
   if (lower.includes("pantallas") || lower.includes("digital signage")) return "pantallas digitales";
 
-  if (lower.length >= 4 && lower.length <= 80 && !/\b(mañana|pasado|hoy|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo|hora|tarde)\b/.test(lower)) {
-    return lower;
-  }
-
   return undefined;
+}
+
+function sameNormalizedText(left: string, right: string): boolean {
+  return normalizeText(left) === normalizeText(right);
+}
+
+function normalizeText(value: string): string {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function inferRelativeDateTime(lower: string): string | undefined {
@@ -252,12 +276,19 @@ function inferRelativeDateTime(lower: string): string | undefined {
     target.setUTCDate(target.getUTCDate() + daysAhead);
   }
 
-  const time = parseSpokenTime(lower);
+  const time = parseSpokenTime(lower) ?? parseTimeWindow(lower);
   if (!time) {
     return undefined;
   }
 
   return `${target.getUTCFullYear()}-${pad(target.getUTCMonth() + 1)}-${pad(target.getUTCDate())}T${pad(time.hour)}:${pad(time.minute)}:00-06:00`;
+}
+
+function parseTimeWindow(lower: string): { hour: number; minute: number } | undefined {
+  if (/\bmañana\b/.test(lower) && !lower.includes("pasado mañana")) return { hour: 10, minute: 0 };
+  if (/\btarde\b/.test(lower)) return { hour: 16, minute: 0 };
+  if (/\bnoche\b/.test(lower)) return { hour: 18, minute: 0 };
+  return undefined;
 }
 
 function getMexicoCityToday(): { year: number; month: number; day: number } {

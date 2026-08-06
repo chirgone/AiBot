@@ -1,0 +1,225 @@
+import type { RuntimePromptConfig } from "./types";
+
+interface TenantRuntimeRow {
+  tenant_id: string;
+  tenant_name: string;
+  timezone: string;
+  language: string;
+  business_summary: string | null;
+  greeting: string | null;
+  confirmation_template: string | null;
+  completion_message: string | null;
+  fallback_message: string | null;
+  speech_hints: string | null;
+  settings: string | null;
+}
+
+interface ServiceRow {
+  name: string;
+  description: string;
+  keywords: string;
+}
+
+interface FlowStepRow {
+  slot_key: string;
+  prompt: string;
+}
+
+const defaultSpeechHints = [
+  "asesoría",
+  "propuesta integral",
+  "soluciones tecnológicas",
+  "cómputo",
+  "DaaS",
+  "servidores",
+  "nube OnPremise",
+  "redes",
+  "ciberseguridad",
+  "SOC",
+  "NOC",
+  "videocolaboración",
+  "arrendamiento tecnológico",
+];
+
+export async function resolveRuntimeConfig(env: Env, toPhone?: string): Promise<RuntimePromptConfig> {
+  if (!toPhone) {
+    return fallbackRuntimeConfig(env);
+  }
+
+  try {
+    const row = await env.DB.prepare(
+      `SELECT t.id AS tenant_id,
+              t.name AS tenant_name,
+              t.timezone,
+              t.language,
+              kp.business_summary,
+              af.greeting,
+              af.confirmation_template,
+              af.completion_message,
+              af.fallback_message,
+              af.speech_hints,
+              af.settings
+         FROM tenant_channels tc
+         JOIN tenants t ON t.id = tc.tenant_id
+         LEFT JOIN knowledge_profiles kp ON kp.tenant_id = t.id
+         LEFT JOIN agent_flows af ON af.tenant_id = t.id AND af.channel = tc.channel AND af.status = 'active'
+        WHERE tc.address = ? AND tc.channel = 'voice' AND tc.status = 'active' AND t.status = 'active'
+        LIMIT 1`,
+    )
+      .bind(toPhone)
+      .first<TenantRuntimeRow>();
+
+    if (!row) {
+      return fallbackRuntimeConfig(env);
+    }
+
+    const [services, steps] = await Promise.all([
+      env.DB.prepare(
+        `SELECT name, description, keywords
+           FROM tenant_services
+          WHERE tenant_id = ?
+          ORDER BY priority ASC, name ASC`,
+      )
+        .bind(row.tenant_id)
+        .all<ServiceRow>(),
+      env.DB.prepare(
+        `SELECT fs.slot_key, fs.prompt
+           FROM flow_steps fs
+           JOIN agent_flows af ON af.id = fs.flow_id
+          WHERE af.tenant_id = ? AND af.channel = 'voice' AND af.status = 'active'
+          ORDER BY fs.step_order ASC`,
+      )
+        .bind(row.tenant_id)
+        .all<FlowStepRow>(),
+    ]);
+
+    const settings = parseJsonRecord(row.settings);
+    const prompts: RuntimePromptConfig["prompts"] = {};
+    for (const step of steps.results ?? []) {
+      if (step.slot_key === "nombre_cliente" || step.slot_key === "motivo" || step.slot_key === "fecha_hora" || step.slot_key === "telefono") {
+        prompts[step.slot_key] = step.prompt;
+      }
+    }
+
+    const assistantName = stringFrom(settings.assistant_name, env.ASSISTANT_NAME);
+    const fallback = fallbackRuntimeConfig(env);
+
+    return {
+      tenantId: row.tenant_id,
+      businessName: row.tenant_name,
+      assistantName,
+      language: row.language || env.LANGUAGE,
+      voice: stringFrom(settings.voice, env.VOICE),
+      timeZone: row.timezone || env.TIME_ZONE,
+      greeting: syncAssistantName(row.greeting || fallback.greeting, assistantName),
+      confirmationTemplate: row.confirmation_template || fallback.confirmationTemplate,
+      completionMessage: row.completion_message || fallback.completionMessage,
+      fallbackMessage: row.fallback_message || fallback.fallbackMessage,
+      speechHints: parseStringArray(row.speech_hints, defaultSpeechHints),
+      prompts,
+      knowledgeSummary: row.business_summary || fallback.knowledgeSummary,
+      services: (services.results ?? []).map((service) => ({
+        name: service.name,
+        description: service.description,
+        keywords: parseStringArray(service.keywords, []),
+      })),
+    };
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        message: "runtime config lookup failed; using fallback",
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return fallbackRuntimeConfig(env);
+  }
+}
+
+export async function recordConfirmedLead(
+  env: Env,
+  config: RuntimePromptConfig,
+  conversationId: string,
+  phone: string,
+  slots: { nombre_cliente?: string; telefono?: string; fecha_hora?: string; motivo?: string },
+): Promise<void> {
+  if (config.tenantId === "fallback") {
+    return;
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO leads (id, tenant_id, channel, conversation_id, name, phone, service, requested_at, status, source, metadata)
+     VALUES (?, ?, 'voice', ?, ?, ?, ?, ?, 'confirmed', 'voice', ?)
+     ON CONFLICT(tenant_id, conversation_id) DO UPDATE SET
+       name = excluded.name,
+       phone = excluded.phone,
+       service = excluded.service,
+       requested_at = excluded.requested_at,
+       status = 'confirmed',
+       updated_at = strftime('%s','now')`,
+  )
+    .bind(
+      crypto.randomUUID(),
+      config.tenantId,
+      conversationId,
+      slots.nombre_cliente ?? null,
+      slots.telefono ?? phone,
+      slots.motivo ?? null,
+      slots.fecha_hora ?? null,
+      JSON.stringify({ appointmentId: conversationId }),
+    )
+    .run();
+}
+
+function fallbackRuntimeConfig(env: Env): RuntimePromptConfig {
+  return {
+    tenantId: "fallback",
+    businessName: env.BUSINESS_NAME,
+    assistantName: env.ASSISTANT_NAME,
+    language: env.LANGUAGE,
+    voice: env.VOICE,
+    timeZone: env.TIME_ZONE,
+    greeting: `Gracias por llamar a ${env.BUSINESS_NAME}. Soy ${env.ASSISTANT_NAME}. Te ayudo a canalizar tu solicitud con el equipo correcto. Para empezar, ¿me regalas tu nombre?`,
+    confirmationTemplate:
+      "Perfecto. Tengo registrada una asesoría para {nombre_cliente}, {fecha_hora}, sobre {motivo}. ¿Es correcto?",
+    completionMessage:
+      "Listo, quedó registrada tu solicitud. Un especialista dará seguimiento. Que tengas buen día.",
+    fallbackMessage: "Perdón, no te escuché bien. ¿Me lo repites un poco más despacio?",
+    speechHints: defaultSpeechHints,
+    prompts: {},
+    knowledgeSummary:
+      "AngaFlow configura bots y agentes conversacionales multi-tenant para capturar, calificar y escalar conversaciones de negocio.",
+    services: [],
+  };
+}
+
+function parseJsonRecord(value: string | null): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseStringArray(value: string | null, fallback: string[]): string[] {
+  if (!value) return fallback;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function stringFrom(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function syncAssistantName(greeting: string, assistantName: string): string {
+  if (!assistantName.trim()) return greeting;
+  if (/\bSoy\s+[^.¿?]+[.¿?]/i.test(greeting)) {
+    return greeting.replace(/\bSoy\s+[^.¿?]+([.¿?])/i, `Soy ${assistantName}$1`);
+  }
+  return greeting.replace(/(Gracias por (?:llamar|comunicarte|contactar)[^.]+\.)/i, `$1 Soy ${assistantName}.`);
+}

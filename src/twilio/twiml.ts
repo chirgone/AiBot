@@ -3,23 +3,46 @@ export interface GatherOptions {
   message: string;
   language: string;
   voice: string;
+  hints?: string[];
 }
 
 export function twimlGather(options: GatherOptions): Response {
   const body = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="${escapeXml(options.action)}" method="POST" language="${escapeXml(options.language)}" speechTimeout="2" timeout="6" actionOnEmptyResult="true" hints="asesoría,propuesta integral,soluciones tecnológicas,cómputo,DaaS,Device as a Service,servidores,nube OnPremise,data center,almacenamiento,virtualización,redes,WiFi,LAN,ciberseguridad,videovigilancia,CCTV,monitoreo 24/7,SOC,NOC,soporte TI,mantenimiento TI,videocolaboración,audioconferencia,automatización de espacios,arrendamiento tecnológico,leasing,financiamiento,ataque,ransomware,mañana,pasado mañana,tarde,nombre,hora">
-    <Say voice="${escapeXml(options.voice)}" language="${escapeXml(options.language)}">${escapeXml(options.message)}</Say>
+  <Gather input="speech" action="${escapeXml(options.action)}" method="POST" language="${escapeXml(options.language)}" speechTimeout="1" timeout="4" actionOnEmptyResult="true" hints="${escapeXml((options.hints ?? defaultHints).join(","))}">
+    <Say voice="${escapeXml(options.voice)}" language="${escapeXml(options.language)}">${escapeXml(shortenForTwilio(options.message))}</Say>
   </Gather>
+  <Redirect method="POST">${escapeXml(options.action)}</Redirect>
 </Response>`;
 
   return twimlResponse(body);
 }
 
+const defaultHints = [
+  "asesoría",
+  "propuesta integral",
+  "soluciones tecnológicas",
+  "cómputo",
+  "DaaS",
+  "servidores",
+  "nube OnPremise",
+  "redes",
+  "ciberseguridad",
+  "SOC",
+  "NOC",
+  "videocolaboración",
+  "arrendamiento tecnológico",
+  "mañana",
+  "pasado mañana",
+  "tarde",
+  "nombre",
+  "hora",
+];
+
 export function twimlSayAndHangup(message: string, language: string, voice: string): Response {
   const body = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="${escapeXml(voice)}" language="${escapeXml(language)}">${escapeXml(message)}</Say>
+  <Say voice="${escapeXml(voice)}" language="${escapeXml(language)}">${escapeXml(shortenForTwilio(message))}</Say>
   <Hangup />
 </Response>`;
 
@@ -42,4 +65,10 @@ function escapeXml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+function shortenForTwilio(value: string): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  if (clean.length <= 420) return clean;
+  return `${clean.slice(0, 400).replace(/\s+\S*$/, "")}.`;
 }
