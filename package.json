@@ -1,6 +1,6 @@
 {
   "name": "agentica",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "AngaFlow conversational studio and multi-tenant voice runtime on Cloudflare Workers, D1, Durable Objects, Workers AI, and Twilio.",
   "private": true,
   "scripts": {

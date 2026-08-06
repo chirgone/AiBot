@@ -53,6 +53,8 @@ export async function resolveRuntimeConfig(env: Env, toPhone?: string): Promise<
               t.timezone,
               t.language,
               kp.business_summary,
+              af.id AS flow_id,
+              af.version AS flow_version,
               af.greeting,
               af.confirmation_template,
               af.completion_message,
@@ -67,11 +69,24 @@ export async function resolveRuntimeConfig(env: Env, toPhone?: string): Promise<
         LIMIT 1`,
     )
       .bind(toPhone)
-      .first<TenantRuntimeRow>();
+      .first<TenantRuntimeRow & { flow_id: string | null; flow_version: string | null }>();
 
     if (!row) {
+      console.log(
+        JSON.stringify({ message: "runtime config: no tenant matched", toPhone }),
+      );
       return fallbackRuntimeConfig(env);
     }
+
+    console.log(
+      JSON.stringify({
+        message: "runtime config resolved",
+        toPhone,
+        tenantId: row.tenant_id,
+        flowId: row.flow_id,
+        flowVersion: row.flow_version,
+      }),
+    );
 
     const [services, steps] = await Promise.all([
       env.DB.prepare(

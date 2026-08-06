@@ -282,11 +282,14 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
   }
 
   if (request.method === "GET" && action === "flow") {
+    // Prefiere el draft (lo que se est\u00e1 editando). Si no hay draft, cae al
+    // active para que el editor tenga algo con qu\u00e9 empezar. Nunca devuelve
+    // archived. Invariante: 1 draft + 1 active m\u00e1x por (tenant, channel).
     const flow = await env.DB.prepare(
       `SELECT id, channel, version, status, greeting, confirmation_template, completion_message, fallback_message, speech_hints, settings, updated_at
          FROM agent_flows
-        WHERE tenant_id = ?
-         ORDER BY CASE status WHEN 'draft' THEN 0 WHEN 'active' THEN 1 ELSE 2 END, updated_at DESC
+        WHERE tenant_id = ? AND channel = 'voice' AND status IN ('draft', 'active')
+         ORDER BY CASE status WHEN 'draft' THEN 0 ELSE 1 END
         LIMIT 1`,
     )
       .bind(tenantId)
@@ -325,39 +328,73 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
   }
 
   if (request.method === "POST" && action === "publish") {
-    const flow = await env.DB.prepare(
+    // El draft es \u00fanico por (tenant_id, channel='voice') gracias al \u00edndice
+    // parcial. Publish lo promueve a active de forma at\u00f3mica y baja el activo
+    // anterior a draft si exist\u00eda. No dependemos de updated_at.
+    const draft = await env.DB.prepare(
       `SELECT id, version, greeting, settings
          FROM agent_flows
-        WHERE tenant_id = ?
-         ORDER BY CASE status WHEN 'draft' THEN 0 WHEN 'active' THEN 1 ELSE 2 END, updated_at DESC
+        WHERE tenant_id = ? AND channel = 'voice' AND status = 'draft'
         LIMIT 1`,
     )
       .bind(tenantId)
       .first<{ id: string; version: string; greeting: string; settings: string | null }>();
-    if (!flow) {
-      return json({ error: "No flow found for tenant" }, 404);
+    if (!draft) {
+      return json({ error: "No draft flow to publish. Save a draft first." }, 404);
     }
 
+    // D1 no soporta transacciones expl\u00edcitas; batch() ejecuta las statements
+    // en una sola invocaci\u00f3n at\u00f3mica. Orden importa: el active viejo baja a
+    // 'archived' antes que el draft suba a 'active' para no violar el \u00edndice.
     await env.DB.batch([
-      env.DB.prepare("UPDATE agent_flows SET status = 'draft', updated_at = strftime('%s','now') WHERE tenant_id = ?").bind(tenantId),
-      env.DB.prepare("UPDATE agent_flows SET status = 'active', updated_at = strftime('%s','now') WHERE id = ?").bind(flow.id),
+      env.DB.prepare(
+        `UPDATE agent_flows
+            SET status = 'archived', updated_at = strftime('%s','now')
+          WHERE tenant_id = ? AND channel = 'voice' AND status = 'active' AND id != ?`,
+      ).bind(tenantId, draft.id),
+      env.DB.prepare(
+        `UPDATE agent_flows
+            SET status = 'active', updated_at = strftime('%s','now')
+          WHERE id = ?`,
+      ).bind(draft.id),
     ]);
+
     const channel = await env.DB.prepare("SELECT address FROM tenant_channels WHERE tenant_id = ? AND channel = 'voice' AND status = 'active' LIMIT 1")
       .bind(tenantId)
       .first<{ address: string }>();
-    const settings = parseJsonRecord(flow.settings);
-    const activeFlow = await env.DB.prepare("SELECT id, version, status FROM agent_flows WHERE id = ? AND status = 'active' LIMIT 1")
-      .bind(flow.id)
+    const settings = parseJsonRecord(draft.settings);
+    const activeFlow = await env.DB.prepare(
+      "SELECT id, version, status FROM agent_flows WHERE id = ? AND status = 'active' LIMIT 1",
+    )
+      .bind(draft.id)
       .first<{ id: string; version: string; status: string }>();
-    await audit(env, tenantId, identity.email, "flow.publish", { flowId: flow.id, version: flow.version });
+
+    if (!activeFlow) {
+      return json({ error: "Publish failed: draft did not activate. Check D1 logs." }, 500);
+    }
+
+    await audit(env, tenantId, identity.email, "flow.publish", {
+      flowId: draft.id,
+      version: draft.version,
+      voiceNumber: channel?.address ?? null,
+    });
+    console.log(
+      JSON.stringify({
+        message: "flow published",
+        tenantId,
+        flowId: draft.id,
+        version: draft.version,
+        voiceNumber: channel?.address ?? null,
+      }),
+    );
     return json({
-      ok: Boolean(activeFlow),
-      flowId: flow.id,
-      version: flow.version,
-      activeStatus: activeFlow?.status ?? null,
+      ok: true,
+      flowId: draft.id,
+      version: draft.version,
+      activeStatus: activeFlow.status,
       assistantName: stringFrom(settings.assistant_name, "Asistente virtual"),
       voiceNumber: channel?.address ?? null,
-      greetingPreview: flow.greeting,
+      greetingPreview: draft.greeting,
       publishedAt: new Date().toISOString(),
     });
   }
@@ -454,6 +491,15 @@ async function scanKnowledgeSources(env: Env, tenantId: string): Promise<{ ok: b
 }
 
 async function createDefaultFlow(env: Env, tenantId: string, businessName: string, language: string, timezone: string, assistantName: string): Promise<void> {
+  // Idempotente: no-op si el tenant ya tiene un draft por canal (respeta el
+  // \u00edndice \u00fanico parcial idx_agent_flows_one_draft).
+  const existing = await env.DB.prepare(
+    "SELECT id FROM agent_flows WHERE tenant_id = ? AND channel = 'voice' AND status = 'draft' LIMIT 1",
+  )
+    .bind(tenantId)
+    .first<{ id: string }>();
+  if (existing) return;
+
   const flowId = `flow_${crypto.randomUUID()}`;
   await env.DB.prepare(
     `INSERT INTO agent_flows (
@@ -600,24 +646,79 @@ function buildFlowDraft(input: SaveFlowInput, businessName: string, vertical: st
 }
 
 async function createFlowDraft(env: Env, tenantId: string, template: FlowTemplate, businessName: string, language: string, timezone: string, assistantName: string): Promise<string> {
-  const flowId = `flow_${crypto.randomUUID()}`;
-  await env.DB.prepare(
-    `INSERT INTO agent_flows (
-       id, tenant_id, channel, version, status, greeting, confirmation_template, completion_message, fallback_message, speech_hints, settings
-     ) VALUES (?, ?, 'voice', ?, 'draft', ?, ?, ?, ?, ?, ?)`,
+  // UPSERT semantics: cada tenant tiene exactamente un draft por canal. El
+  // \u00edndice parcial idx_agent_flows_one_draft (migration 0003) garantiza la
+  // invariante a nivel D1; aqu\u00ed reutilizamos la fila existente si existe para
+  // preservar su UUID (y as\u00ed su historial de flow_steps antes de reescribirlos).
+  const channel = "voice";
+  const existing = await env.DB.prepare(
+    "SELECT id FROM agent_flows WHERE tenant_id = ? AND channel = ? AND status = 'draft' LIMIT 1",
   )
-    .bind(
-      flowId,
-      tenantId,
-      `1.0.${Date.now()}`,
-      syncAssistantName(template.greeting, assistantName),
-      template.confirmationTemplate,
-      template.completionMessage,
-      template.fallbackMessage,
-      JSON.stringify(template.speechHints),
-      JSON.stringify({ assistant_name: assistantName, business_name: businessName, language, voice: "Polly.Mia-Neural", time_zone: timezone, speechTimeout: "2", timeout: "6", template_id: template.id, template_name: template.name }),
+    .bind(tenantId, channel)
+    .first<{ id: string }>();
+
+  const flowId = existing?.id ?? `flow_${crypto.randomUUID()}`;
+  const greeting = syncAssistantName(template.greeting, assistantName);
+  const settingsJson = JSON.stringify({
+    assistant_name: assistantName,
+    business_name: businessName,
+    language,
+    voice: "Polly.Mia-Neural",
+    time_zone: timezone,
+    speechTimeout: "2",
+    timeout: "6",
+    template_id: template.id,
+    template_name: template.name,
+  });
+  const speechHintsJson = JSON.stringify(template.speechHints);
+  const version = `1.0.${Date.now()}`;
+
+  if (existing) {
+    await env.DB.prepare(
+      `UPDATE agent_flows
+          SET version = ?,
+              greeting = ?,
+              confirmation_template = ?,
+              completion_message = ?,
+              fallback_message = ?,
+              speech_hints = ?,
+              settings = ?,
+              updated_at = strftime('%s','now')
+        WHERE id = ?`,
     )
-    .run();
+      .bind(
+        version,
+        greeting,
+        template.confirmationTemplate,
+        template.completionMessage,
+        template.fallbackMessage,
+        speechHintsJson,
+        settingsJson,
+        flowId,
+      )
+      .run();
+    // Rewrite flow_steps para reflejar el template actual del draft.
+    await env.DB.prepare("DELETE FROM flow_steps WHERE flow_id = ?").bind(flowId).run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO agent_flows (
+         id, tenant_id, channel, version, status, greeting, confirmation_template, completion_message, fallback_message, speech_hints, settings
+       ) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        flowId,
+        tenantId,
+        channel,
+        version,
+        greeting,
+        template.confirmationTemplate,
+        template.completionMessage,
+        template.fallbackMessage,
+        speechHintsJson,
+        settingsJson,
+      )
+      .run();
+  }
 
   for (const [index, step] of template.steps.entries()) {
     await env.DB.prepare(
