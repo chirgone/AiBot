@@ -32,7 +32,7 @@ export default {
         }
 
         if (url.pathname.startsWith("/api/admin")) {
-          return await handleAdminApi(request, env, admin);
+          return await handleAdminApi(request, env, admin, ctx);
         }
 
         if (request.method === "GET" || request.method === "HEAD") {
@@ -54,7 +54,9 @@ export default {
         JSON.stringify({
           message: "request failed",
           path: url.pathname,
+          method: request.method,
           error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
         }),
       );
 
@@ -66,7 +68,11 @@ export default {
         );
       }
 
-      return Response.json({ error: "Internal server error" }, { status: 500 });
+      return Response.json({
+        error: "Internal server error",
+        detail: error instanceof Error ? error.message : String(error),
+        path: url.pathname,
+      }, { status: 500 });
     }
   },
 } satisfies ExportedHandler<Env>;
@@ -208,11 +214,27 @@ function retryPrompt(dialogState: string, fallbackMessage: string): string {
 // overhead (embedding + query + LLM ~1-2s) cuando el mensaje es solo un
 // nombre, un tel\u00e9fono o una confirmaci\u00f3n. Copia local para no
 // exportar la del DO.
+// Heur\u00edstica multi-vertical: matchea intent de "quiero saber sobre X".
+// Cubre verbos gen\u00e9ricos (saber, conocer, contar, explicar, dime),
+// pronombres interrogativos (qu\u00e9, cu\u00e1l, c\u00f3mo, d\u00f3nde, cu\u00e1nto),
+// y sustantivos comunes de discovery empresarial (reconocimientos,
+// estrategia, valor, misi\u00f3n, visi\u00f3n, equipo, certificaciones, experiencia,
+// soluciones, tecnolog\u00eda, empresa, servicios, productos) + verticales
+// (hoteler\u00eda, salud, retail, educaci\u00f3n, gobierno). Si dudas, deja pasar
+// \u2014 el gate anti-alucinaci\u00f3n de score m\u00ednimo se encarga de rechazar
+// preguntas irrelevantes con fallback honesto.
 function looksLikeKnowledgeQuery(message: string): boolean {
-  if (message.length < 8) return false;
-  return /\b(tienen|manejan|ofrecen|hacen|cuentan|servicio|servicios|\u00e1rea|\u00e1reas|area|areas|producto|productos|pueden ayudar|me pueden ayudar|qu[eé]|cu[aá]l|cu[aá]les|d[oó]nde|d[oó]nde est[aá]n|horario|horarios|precio|precios|costo|costos|cu[aá]nto|cu[aá]ntos|c[oó]mo|c[oó]mo funciona|informaci[oó]n|dime|cu[eé]ntame|alberca|spa|estacionamiento|wifi|mascotas|desayuno|habitaci[oó]n|habitaciones|promoci[oó]n|promociones|oferta|descuento|paquete|contacto|direcci[oó]n|ubicaci[oó]n)\b/i.test(
-    message,
-  );
+  if (message.length < 6) return false;
+  const m = message.toLowerCase();
+  // Verbos e intents de "quiero saber / cu\u00e9ntame / dime / explica"
+  if (/\b(quiero saber|me interesa saber|puedes decirme|quiero conocer|dime|dime m[aá]s|cu[eé]ntame|explica|expl[ií]came|platicame|plat[ií]came|h[aá]blame|sabe[rn]|conocer|saber sobre|informaci[oó]n sobre|informame|infoacerca|acerca de|sobre su|sobre sus|sobre el|sobre la|sobre los|sobre las)\b/i.test(m)) return true;
+  // Pronombres interrogativos
+  if (/\b(qu[eé]|cu[aá]l|cu[aá]les|d[oó]nde|c[oó]mo|cu[aá]ndo|por qu[eé]|para qu[eé]|cu[aá]nto|cu[aá]ntos|cu[aá]ntas)\b/i.test(m)) return true;
+  // Sustantivos universales de discovery
+  if (/\b(reconocimiento|reconocimientos|premio|premios|estrategia|estrategias|valor|valores|visi[oó]n|misi[oó]n|prop[oó]sito|equipo|equipos|nosotros|acerca|empresa|compa[nñ][ií]a|firma|hist[oó]ria|historia|trayectoria|experiencia|especialidad|especialidades|certificaci[oó]n|certificaciones|acreditaci[oó]n|acreditaciones|alianza|alianzas|partner|partners|socio|socios|cliente|clientes|caso|casos|proyecto|proyectos|tecnolog[ií]a|tecnolog[ií]as|soluci[oó]n|soluciones|servicio|servicios|producto|productos|catalogo|cat[aá]logo|industria|industrias|sector|sectores|\u00e1rea|\u00e1reas|area|areas|pr[aá]ctica|pr[aá]cticas|especial|beneficio|beneficios|membres[ií]a|membres[ií]as|paquete|paquetes|oferta|ofertas|promoci[oó]n|promociones|descuento|descuentos|precio|precios|costo|costos|tarifa|tarifas|contacto|contactos|direcci[oó]n|ubicaci[oó]n|sucursal|sucursales|horario|horarios|tel[eé]fono|correo|email|whatsapp)\b/i.test(m)) return true;
+  // Verticales espec\u00edficas (hoteler\u00eda, salud, retail, educaci\u00f3n)
+  if (/\b(habitaci[oó]n|habitaciones|cuarto|cuartos|suite|suites|alberca|spa|estacionamiento|wifi|mascota|mascotas|desayuno|check-?in|reserva|reservas|hotel|hoteles|resort|resorts|doctor|doctora|especialista|especialistas|cl[ií]nica|hospital|carrera|carreras|curso|cursos|programa|programas|admisi[oó]n|tramite|tr[aá]mite|permiso|licencia)\b/i.test(m)) return true;
+  return false;
 }
 
 async function resolveRagAnswer(

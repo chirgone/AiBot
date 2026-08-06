@@ -240,6 +240,9 @@ function adminHtml(email: string): string {
       .tiny { font-size: 12px; }
 
       .tenant-card {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
         width: 100%;
         text-align: left;
         border: 1px solid var(--line);
@@ -252,6 +255,46 @@ function adminHtml(email: string): string {
       .tenant-card.active { outline: 2px solid var(--brand); background: #10233a; }
       .tenant-card strong { display: block; margin-bottom: 4px; }
       .tenant-card span { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+
+      .tenant-card-body {
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .tenant-card-body:hover strong { color: var(--brand); }
+
+      .tenant-card-actions {
+        display: flex;
+        gap: 8px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+      }
+      .tenant-card-actions button {
+        flex: 1;
+        padding: 8px 10px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background 120ms ease, border-color 120ms ease;
+      }
+      .tenant-card-actions button:hover {
+        background: #10233a;
+        border-color: var(--brand-2);
+      }
+      .tenant-card-actions .tenant-card-delete {
+        color: #ff8b8b;
+        border-color: #4a1f28;
+      }
+      .tenant-card-actions .tenant-card-delete:hover {
+        background: #3a1219;
+        border-color: #ff5865;
+        color: #ffd0d4;
+      }
       .tenant-group { margin-bottom: 18px; }
       .tenant-group-title {
         display: flex;
@@ -752,15 +795,20 @@ function adminHtml(email: string): string {
           return acc;
         }, {});
         const renderCard = (tenant) => [
-          '<button type="button" class="tenant-card'+(tenant.id === state.tenantId ? ' active' : '')+'"',
+          '<article class="tenant-card'+(tenant.id === state.tenantId ? ' active' : '')+'"',
           ' data-id="'+esc(tenant.id)+'"',
           ' aria-current="'+(tenant.id === state.tenantId ? 'true' : 'false')+'">',
+          '<div class="tenant-card-body" data-open="'+esc(tenant.id)+'">',
           '<strong>'+esc(tenant.name)+'</strong>',
           '<span>'+esc(tenant.status || 'activo')+' · '+esc(tenant.country || 'MX')+'</span>',
           '<span>'+esc(tenant.voice_number ? 'Voz: ' + tenant.voice_number : 'Sin número de voz')+'</span>',
           '<span>'+esc(tenant.website || 'Sin URL')+'</span>',
-          '<span class="status">Abrir negocio</span>',
-          '</button>'
+          '</div>',
+          '<div class="tenant-card-actions">',
+          '<button type="button" class="tenant-card-edit" data-edit="'+esc(tenant.id)+'" aria-label="Editar '+esc(tenant.name)+'">Editar</button>',
+          '<button type="button" class="tenant-card-delete danger" data-delete="'+esc(tenant.id)+'" aria-label="Borrar '+esc(tenant.name)+'">Borrar</button>',
+          '</div>',
+          '</article>'
         ].join('');
 
         const renderGroup = ([vertical, tenants]) => [
@@ -775,17 +823,72 @@ function adminHtml(email: string): string {
           .sort(([a], [b]) => a.localeCompare(b, 'es'))
           .map(renderGroup)
           .join('');
-        document.querySelectorAll('.tenant-card').forEach(button => {
-          button.addEventListener('click', async () => {
-            state.tenantId = button.dataset.id;
-            state.leadsAutoOpened = false;
-            renderBusinessDashboard();
-            renderTenantEditor();
-            renderTemplatePicker();
-            await Promise.all([loadServices(), loadSources(), loadFlow(), loadLeads()]);
-            switchView('tenants-section');
+
+        const openTenant = async (tenantId) => {
+          state.tenantId = tenantId;
+          state.leadsAutoOpened = false;
+          renderBusinessDashboard();
+          renderTenantEditor();
+          renderTemplatePicker();
+          await Promise.all([loadServices(), loadSources(), loadFlow(), loadLeads()]);
+          switchView('tenants-section');
+        };
+
+        // Body de la tarjeta abre el negocio (equivalente a Editar).
+        document.querySelectorAll('.tenant-card-body[data-open]').forEach(el => {
+          el.addEventListener('click', () => openTenant(el.dataset.open));
+        });
+
+        // Bot\u00f3n expl\u00edcito Editar: abre el negocio en la vista de detalle.
+        document.querySelectorAll('.tenant-card-edit[data-edit]').forEach(btn => {
+          btn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            openTenant(btn.dataset.edit);
           });
         });
+
+        // Bot\u00f3n expl\u00edcito Borrar: pide confirmaci\u00f3n doble sin abrir la tarjeta.
+        document.querySelectorAll('.tenant-card-delete[data-delete]').forEach(btn => {
+          btn.addEventListener('click', async (event) => {
+            event.stopPropagation();
+            const tenant = state.tenants.find(t => t.id === btn.dataset.delete);
+            if (!tenant) return;
+            await deleteTenantWithConfirm(tenant);
+          });
+        });
+      }
+
+      // Borrado con doble confirmaci\u00f3n (aviso + nombre escrito).
+      // Reutilizable desde el bot\u00f3n global y desde cada tarjeta.
+      async function deleteTenantWithConfirm(tenant) {
+        const warn = '¿Seguro que quieres borrar "' + tenant.name + '"?\n\n' +
+          '• El negocio dejar\u00e1 de responder llamadas.\n' +
+          '• Su n\u00famero quedar\u00e1 disponible para reasignar.\n' +
+          '• Se PRESERVAN prospectos, flujos y conocimiento.\n' +
+          '• Podr\u00e1s restaurarlo desde el panel.';
+        if (!confirm(warn)) return;
+
+        const typed = prompt(
+          'Para confirmar, escribe el nombre exacto del negocio:\n\n' + tenant.name,
+        );
+        if (typed === null) return;
+        if (typed.trim() !== tenant.name) {
+          showNotice('tenantResult', 'El nombre no coincide. Borrado cancelado.', 'danger');
+          return;
+        }
+
+        showNotice('tenantResult', 'Borrando negocio...', 'warn');
+        try {
+          await api('tenants/' + tenant.id, {
+            method: 'DELETE',
+            body: JSON.stringify({ confirm: tenant.name }),
+          });
+          showNotice('tenantResult', 'Negocio "' + tenant.name + '" borrado. Restaurable desde el panel de negocios borrados.', 'ok');
+          if (state.tenantId === tenant.id) state.tenantId = null;
+          await load();
+        } catch (error) {
+          showNotice('tenantResult', 'No se pudo borrar: ' + (error.message || error), 'danger');
+        }
       }
 
       function currentTenant() {
@@ -962,8 +1065,35 @@ function adminHtml(email: string): string {
           return '<div class="card"><label class="tiny muted" for="'+fieldId+'">Paso '+esc(index + 1)+' · '+esc(labelForSlot(step.slotKey))+'</label><textarea id="'+fieldId+'" class="flow-step-prompt" data-slot="'+esc(step.slotKey)+'"></textarea></div>';
         }).join('');
         document.querySelectorAll('.flow-step-prompt').forEach((field, index) => { field.value = customFlow.steps[index].prompt; });
-        $('saveFlowMessages').addEventListener('click', () => saveEditorFlow('Borrador guardado. Cuando se vea correcto, presiona Publicar al Worker.'));
-        $('publishFlowEditor').addEventListener('click', publishFlow);
+
+        // Bind directo con onclick (idempotente): innerHTML del contenedor
+        // recrea el bot\u00f3n en cada render, as\u00ed que addEventListener sobre
+        // uno viejo no funcionar\u00eda; con .onclick sobrescribimos siempre
+        // el handler del elemento nuevo. Adem\u00e1s protegemos ante clicks
+        // dobles con un flag busy.
+        const saveBtn = $('saveFlowMessages');
+        if (saveBtn) {
+          saveBtn.onclick = async () => {
+            if (saveBtn.dataset.busy === 'true') return;
+            saveBtn.dataset.busy = 'true';
+            const label = saveBtn.textContent;
+            saveBtn.textContent = 'Guardando...';
+            saveBtn.disabled = true;
+            try {
+              await saveEditorFlow('Borrador guardado. Cuando se vea correcto, presiona Publicar al Worker.');
+            } catch (e) {
+              showNotice('flowResult', 'No se pudo guardar el borrador: ' + (e.message || e), 'danger');
+            } finally {
+              saveBtn.dataset.busy = 'false';
+              saveBtn.textContent = label;
+              saveBtn.disabled = false;
+            }
+          };
+        }
+        const publishBtn = $('publishFlowEditor');
+        if (publishBtn) {
+          publishBtn.onclick = publishFlow;
+        }
         if (state.lastPublish?.tenantId === state.tenantId) {
           renderPublishStatus(state.lastPublish.result, 'ok');
         }
@@ -1002,12 +1132,23 @@ function adminHtml(email: string): string {
       }
 
       async function saveEditorFlow(message) {
-        if (!hasTenant()) return;
+        if (!hasTenant()) {
+          showNotice('flowResult', 'No hay negocio seleccionado.', 'danger');
+          return;
+        }
         showNotice('flowResult', 'Guardando borrador...', 'warn');
-        const r = await api('tenants/' + state.tenantId + '/flow', { method:'POST', body: JSON.stringify({ customFlow: flowFromEditor() }) });
-        showNotice('flowResult', message, 'ok');
-        await loadFlow();
-        return r;
+        try {
+          const r = await api('tenants/' + state.tenantId + '/flow', {
+            method: 'POST',
+            body: JSON.stringify({ customFlow: flowFromEditor() }),
+          });
+          showNotice('flowResult', message, 'ok');
+          await loadFlow();
+          return r;
+        } catch (error) {
+          showNotice('flowResult', 'No se pudo guardar: ' + (error.message || error), 'danger');
+          throw error;
+        }
       }
 
       async function publishFlow() {
@@ -1168,7 +1309,10 @@ function adminHtml(email: string): string {
         const payload = { name: $('businessName').value.trim(), assistantName: $('newAssistantName').value.trim(), voiceNumber: $('newVoiceNumber').value.trim(), vertical: $('vertical').value, website: $('website').value.trim() };
         try {
           const result = await api('tenants', { method: 'POST', body: JSON.stringify(payload) });
-          showNotice('createResult', 'Negocio creado. Te llevo a su detalle para escanear el sitio y configurar el flujo.', 'ok');
+          const autoScanMsg = result.autoScan
+            ? 'Negocio creado. Escaneando ' + payload.website + ' en segundo plano — puede tardar 30-60s. Te llevo al detalle.'
+            : 'Negocio creado. Te llevo a su detalle para escanear el sitio y configurar el flujo.';
+          showNotice('createResult', autoScanMsg, 'ok');
           $('businessName').value = '';
           $('newAssistantName').value = DEFAULT_ASSISTANT_NAME;
           $('newVoiceNumber').value = DEFAULT_VOICE_NUMBER;
@@ -1176,6 +1320,35 @@ function adminHtml(email: string): string {
           state.tenantId = result.tenantId;
           await load();
           switchView('tenants-section');
+
+          // Auto-refresh de fuentes cada 4s hasta que el scan termine
+          // o pasen 90s. El scan es async (ctx.waitUntil) as\u00ed que
+          // vamos pollear el estado de knowledge_sources para el nuevo
+          // tenant y refrescar cuando cambie.
+          if (result.autoScan) {
+            showNotice('tenantResult', 'Escaneo autom\u00e1tico en curso...', 'warn');
+            const started = Date.now();
+            const poll = setInterval(async () => {
+              if (state.tenantId !== result.tenantId || Date.now() - started > 90000) {
+                clearInterval(poll);
+                return;
+              }
+              try {
+                const sources = await api('tenants/' + result.tenantId + '/sources');
+                const scanned = (sources.sources || []).filter(s => s.status === 'scanned').length;
+                const pending = (sources.sources || []).filter(s => s.status === 'pending').length;
+                if (pending === 0 && scanned > 0) {
+                  clearInterval(poll);
+                  showNotice('tenantResult', 'Escaneo listo: ' + scanned + ' p\u00e1ginas procesadas.', 'ok');
+                  await Promise.all([loadServices(), loadSources(), loadFlow()]);
+                } else {
+                  showNotice('tenantResult', 'Escaneando: ' + scanned + ' p\u00e1ginas listas, ' + pending + ' pendientes...', 'warn');
+                }
+              } catch (_e) {
+                // silencioso: polling best-effort
+              }
+            }, 4000);
+          }
         } catch (error) {
           showNotice('createResult', 'No se pudo crear el negocio: ' + (error.message || error), 'danger');
         } finally {
@@ -1215,39 +1388,9 @@ function adminHtml(email: string): string {
         if (!hasTenant()) return;
         const tenant = currentTenant();
         if (!tenant) return;
-
-        // Doble confirmaci\u00f3n. Primero el aviso general, luego pide
-        // escribir el nombre EXACTO. Esto evita clicks accidentales
-        // y match el requisito del backend (body.confirm === tenant.name).
-        const warn = '¿Seguro que quieres borrar "' + tenant.name + '"?\\n\\n' +
-          '• El negocio dejar\u00e1 de responder llamadas.\\n' +
-          '• Su n\u00famero quedar\u00e1 disponible para reasignar.\\n' +
-          '• Se PRESERVAN prospectos, flujos y conocimiento.\\n' +
-          '• Podr\u00e1s restaurarlo desde el panel.';
-        if (!confirm(warn)) return;
-
-        const typed = prompt(
-          'Para confirmar, escribe el nombre exacto del negocio:\\n\\n' + tenant.name,
-        );
-        if (typed === null) return;
-        if (typed.trim() !== tenant.name) {
-          showNotice('tenantResult', 'El nombre no coincide. Borrado cancelado.', 'danger');
-          return;
-        }
-
         setBusy('deleteTenant', true, 'Borrando...');
-        showNotice('tenantResult', 'Borrando negocio...', 'warn');
-        const deletedId = state.tenantId;
         try {
-          await api('tenants/' + deletedId, {
-            method: 'DELETE',
-            body: JSON.stringify({ confirm: tenant.name }),
-          });
-          showNotice('tenantResult', 'Negocio borrado. Se puede restaurar desde el panel de negocios borrados.', 'ok');
-          state.tenantId = null;
-          await load();
-        } catch (error) {
-          showNotice('tenantResult', 'No se pudo borrar: ' + (error.message || error), 'danger');
+          await deleteTenantWithConfirm(tenant);
         } finally {
           setBusy('deleteTenant', false);
         }

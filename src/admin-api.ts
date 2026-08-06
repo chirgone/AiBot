@@ -90,7 +90,7 @@ export function requireAdmin(request: Request): AdminIdentity | Response {
   );
 }
 
-export async function handleAdminApi(request: Request, env: Env, identity: AdminIdentity): Promise<Response> {
+export async function handleAdminApi(request: Request, env: Env, identity: AdminIdentity, ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/^\/api\/admin\/?/, "");
 
@@ -130,34 +130,59 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
     }
 
     const tenantId = `tenant_${crypto.randomUUID()}`;
-    const slug = slugify(input.name);
+    // Slug base con desambiguaci\u00f3n. Aunque el soft-delete libera
+    // slugs, dos tenants activos podr\u00edan compartir nombre; a\u00f1adimos
+    // suffix num\u00e9rico si detectamos colisi\u00f3n.
+    let slug = slugify(input.name);
+    const collision = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM tenants WHERE slug = ?",
+    ).bind(slug).first<{ c: number }>();
+    if ((collision?.c ?? 0) > 0) {
+      slug = `${slug}-${tenantId.slice(-6)}`;
+    }
     const vertical = input.vertical?.trim() || "General / Conversacional";
     const timezone = input.timezone?.trim() || "America/Mexico_City";
     const language = input.language?.trim() || "es-MX";
     const country = input.country?.trim() || "MX";
 
-    await env.DB.prepare(
-      `INSERT INTO tenants (
-         id, name, slug, vertical, country, timezone, language, website,
-         brand_voice_profile, behavior_profile, handoff_rules, memory_policy, learning_policy
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(
-        tenantId,
-        input.name.trim(),
-        slug,
-        vertical,
-        country,
-        timezone,
-        language,
-        input.website,
-        JSON.stringify({ tone: "profesional, natural y útil", brand_phrases: [], avoid: ["sonar robotizado"] }),
-        JSON.stringify({ target_response_seconds: 2, naturalness: "high", fallback_retries: 2, solution_type: "conversational_agent" }),
-        JSON.stringify({ transfer_when: ["solicitud explícita de humano", "baja confianza", "frustración", "más de dos reintentos"], default_message: "Te canalizo con una persona del equipo." }),
-        JSON.stringify({ enabled: true, remember: ["servicio consultado", "preferencia de canal", "historial de conversaciones"], do_not_store: ["secretos", "credenciales", "datos bancarios"] }),
-        JSON.stringify({ mode: "human_approved", version_before_publish: true }),
+    try {
+      await env.DB.prepare(
+        `INSERT INTO tenants (
+           id, name, slug, vertical, country, timezone, language, website,
+           brand_voice_profile, behavior_profile, handoff_rules, memory_policy, learning_policy
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run();
+        .bind(
+          tenantId,
+          input.name.trim(),
+          slug,
+          vertical,
+          country,
+          timezone,
+          language,
+          input.website,
+          JSON.stringify({ tone: "profesional, natural y útil", brand_phrases: [], avoid: ["sonar robotizado"] }),
+          JSON.stringify({ target_response_seconds: 2, naturalness: "high", fallback_retries: 2, solution_type: "conversational_agent" }),
+          JSON.stringify({ transfer_when: ["solicitud explícita de humano", "baja confianza", "frustración", "más de dos reintentos"], default_message: "Te canalizo con una persona del equipo." }),
+          JSON.stringify({ enabled: true, remember: ["servicio consultado", "preferencia de canal", "historial de conversaciones"], do_not_store: ["secretos", "credenciales", "datos bancarios"] }),
+          JSON.stringify({ mode: "human_approved", version_before_publish: true }),
+        )
+        .run();
+    } catch (error) {
+      console.error({
+        message: "tenant.create failed",
+        error: error instanceof Error ? error.message : String(error),
+        input: { name: input.name, slug, website: input.website },
+      });
+      const msg = error instanceof Error ? error.message : String(error);
+      if (/UNIQUE.*slug/i.test(msg)) {
+        return json({
+          error: "Slug already in use",
+          message: "Ya existe un negocio con ese nombre. Usa uno distinto o restaura el negocio borrado.",
+        }, 409);
+      }
+      return json({ error: "Could not create business", detail: msg }, 500);
+    }
 
     await env.DB.prepare(
       `INSERT INTO knowledge_sources (id, tenant_id, url, title, status)
@@ -169,7 +194,36 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
     await createDefaultFlow(env, tenantId, input.name.trim(), language, timezone, input.assistantName?.trim() || "Asistente virtual");
     await upsertVoiceChannel(env, tenantId, input.voiceNumber?.trim());
     await audit(env, tenantId, identity.email, "tenant.create", { name: input.name, vertical, website: input.website });
-    return json({ ok: true, tenantId });
+
+    // Auto-scan del sitio principal en background. No bloqueamos la
+    // respuesta HTTP porque el scan puede tardar 30-60s (fetch p\u00e1ginas
+    // + embeddings + Vectorize). El admin UI hace polling de /sources
+    // y muestra el progreso. Si ctx no est\u00e1 disponible por alg\u00fan motivo,
+    // caemos a await bloqueante como fallback.
+    const scanTask = (async () => {
+      try {
+        const result = await scanKnowledgeSources(env, tenantId);
+        await audit(env, tenantId, identity.email, "knowledge_sources.auto_scan", result);
+        console.log({
+          message: "tenant.create: auto-scan complete",
+          tenantId,
+          result,
+        });
+      } catch (error) {
+        console.error({
+          message: "tenant.create: auto-scan failed",
+          tenantId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+    if (ctx) {
+      ctx.waitUntil(scanTask);
+    } else {
+      await scanTask;
+    }
+
+    return json({ ok: true, tenantId, autoScan: true });
   }
 
   const tenantMatch = path.match(/^tenants\/([^/]+)(?:\/(services|sources|flow|leads|scan|publish|restore|purge))?$/);
@@ -296,16 +350,25 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
       }, 400);
     }
 
+    // No tocamos agent_flows.status: los unique parciales
+    // idx_agent_flows_one_active / _one_draft causar\u00edan conflicto si
+    // demoteamos active\u2192draft con un draft preexistente. El filtro por
+    // tenants.status='active' en resolveRuntimeConfig ya impide que un
+    // tenant deleted responda llamadas. En restore devuelve al estado
+    // exacto sin ambig\u00fcedad.
+    // Liberamos slug para permitir crear un tenant nuevo con el mismo
+    // nombre. Guardamos el slug original en un suffix con el tenantId
+    // para poder restaurarlo sin colisi\u00f3n si el nombre sigue libre.
+    // Formato: "__deleted__<timestamp>__<slug_original>"
+    const parkedSlug = `__deleted__${Date.now()}__${tenantId.slice(-8)}`;
+
     await audit(env, tenantId, identity.email, "tenant.soft_delete", { name: existing.name });
     await env.DB.batch([
       env.DB.prepare(
-        "UPDATE tenants SET status = 'deleted', deleted_at = strftime('%s','now'), updated_at = strftime('%s','now') WHERE id = ?",
-      ).bind(tenantId),
+        "UPDATE tenants SET status = 'deleted', deleted_at = strftime('%s','now'), updated_at = strftime('%s','now'), slug = ? WHERE id = ?",
+      ).bind(parkedSlug, tenantId),
       env.DB.prepare(
         "UPDATE tenant_channels SET status = 'deleted' WHERE tenant_id = ?",
-      ).bind(tenantId),
-      env.DB.prepare(
-        "UPDATE agent_flows SET status = 'draft' WHERE tenant_id = ? AND status = 'active'",
       ).bind(tenantId),
     ]);
     return json({ ok: true, softDeletedTenantId: tenantId, restorable: true });
@@ -1191,23 +1254,43 @@ function isLikelyServiceUrl(url: string): boolean {
   return /servicio|servicios|solution|solutions|solucion|soluciones|producto|productos|platform|plataforma|practica|práctica|practicas|prácticas|area|área|areas|áreas|derecho|legal/i.test(url);
 }
 
+// Extrae el texto \u00fatil de una p\u00e1gina web para RAG. Antes solo usaba
+// <meta description> cuando exist\u00eda \u2014 pero eso es SEO boilerplate de
+// 100-200 chars y NUNCA contiene el contenido real ("reconocimientos",
+// "estrategia", "valores", etc.). Ahora combinamos:
+//   1. Meta description (contexto general del SEO)
+//   2. Body limpio (contenido real: h1-h6, p, li, main, article, section)
+// hasta 5000 chars totales. Esto es lo que se embebe en el vector.
 function summarizeText(html: string): string {
-  const metaDescription = firstMatch(html, /<meta\s+[^>]*(?:name|property)=["'](?:description|og:description)["'][^>]*content=["']([^"']+)["'][^>]*>/i)
+  const metaDescription =
+    firstMatch(html, /<meta\s+[^>]*(?:name|property)=["'](?:description|og:description)["'][^>]*content=["']([^"']+)["'][^>]*>/i)
     || firstMatch(html, /<meta\s+[^>]*content=["']([^"']+)["'][^>]*(?:name|property)=["'](?:description|og:description)["'][^>]*>/i);
-  if (metaDescription) {
-    return normalizeText(metaDescription).slice(0, 3000);
-  }
 
-  return normalizeText(
+  // Contenido del body: limpiamos script/style/svg/nav/header/footer/aside
+  // y colapsamos whitespace. NO usamos solo meta description porque es
+  // demasiado corta para RAG (150 chars vs 5000).
+  const bodyText = normalizeText(
     html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
-    .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
-    .replace(/<header[\s\S]*?<\/header>/gi, " ")
-    .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-  ).slice(0, 3000);
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
+      .replace(/<header[\s\S]*?<\/header>/gi, " ")
+      .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+      .replace(/<aside[\s\S]*?<\/aside>/gi, " ")
+      .replace(/<form[\s\S]*?<\/form>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+  );
+
+  const meta = metaDescription ? normalizeText(metaDescription) : "";
+  const combined = meta && bodyText
+    ? `${meta}\n\n${bodyText}`
+    : (bodyText || meta);
+  // 12000 chars \u2248 3000-4000 tokens: suficiente para p\u00e1ginas ricas
+  // (nosotros, servicios, catalogos) sin explotar los embeddings.
+  // bge-m3 acepta hasta 8192 tokens de input y truncar\u00e1 si sobra.
+  return combined.slice(0, 12000);
 }
 
 function canonicalizeUrl(value: string): string {

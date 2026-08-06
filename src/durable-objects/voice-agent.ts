@@ -572,8 +572,17 @@ function nextPromptAfterKnowledge(slots: ConversationSlots, runtimeConfig?: Runt
   return `Para ayudarte mejor, ${promptForSlot(missing[0], slots, runtimeConfig)}`;
 }
 
+// Debe estar en sync con looksLikeKnowledgeQuery del worker (src/index.ts).
+// Este gate decide en el DO si aceptamos la respuesta RAG que el worker
+// ya trajo. M\u00e1s permisivo que el gate del worker no rompe nada porque
+// el worker s\u00f3lo pasa ragAnswer si su propio gate ya matche\u00f3.
 function looksLikeKnowledgeQuestion(message: string): boolean {
-  return /\b(tienen|manejan|ofrecen|hacen|cuentan|servicio|servicios|área|áreas|area|areas|producto|productos|pueden ayudar|me pueden ayudar|qué|que|cuál|cual)\b/i.test(message);
+  if (message.length < 6) return false;
+  const m = message.toLowerCase();
+  if (/\b(quiero saber|me interesa saber|puedes decirme|quiero conocer|dime|cu[eé]ntame|explica|expl[ií]came|h[aá]blame|saber sobre|informaci[oó]n sobre|acerca de|sobre su|sobre sus|sobre el|sobre la|sobre los|sobre las)\b/i.test(m)) return true;
+  if (/\b(qu[eé]|cu[aá]l|cu[aá]les|d[oó]nde|c[oó]mo|cu[aá]ndo|por qu[eé]|para qu[eé]|cu[aá]nto|cu[aá]ntos|cu[aá]ntas)\b/i.test(m)) return true;
+  if (/\b(reconocimiento|premio|estrategia|valor|valores|visi[oó]n|misi[oó]n|equipo|nosotros|acerca|empresa|firma|historia|trayectoria|experiencia|especialidad|certificaci[oó]n|acreditaci[oó]n|alianza|partner|socio|cliente|caso|proyecto|tecnolog[ií]a|soluci[oó]n|servicio|producto|cat[aá]logo|industria|sector|beneficio|membres[ií]a|paquete|oferta|promoci[oó]n|precio|costo|tarifa|contacto|direcci[oó]n|ubicaci[oó]n|sucursal|horario|habitaci[oó]n|cuarto|suite|reserva|hotel|resort)\b/i.test(m)) return true;
+  return false;
 }
 
 function normalizeForSearch(value: string): string {
