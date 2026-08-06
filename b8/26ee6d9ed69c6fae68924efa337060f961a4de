@@ -1,0 +1,21 @@
+package.json
+  s_62cef98c48036a::t_55ccc3857facb6 3
+src/admin-page.ts
+  s_62cef98c48036a::t_b9156bb16c49ac 199-227,462,621,625-629,643,777,892-895,1039-1149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b826ee6d9ed69c6fae68924efa337060f961a4de",
+  "prompts": {},
+  "sessions": {
+    "s_62cef98c48036a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_045fe0684ffeVD1f4068RaBVIM",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Ivan Anguiano <jose301184@gmail.com>"
+    }
+  }
+}
