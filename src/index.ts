@@ -142,10 +142,15 @@ async function handleVoiceTurn(request: Request, env: Env, ctx: ExecutionContext
   const context = await stub.getConversationContext(voiceRequest.callSid);
 
   // Paralelizamos extracci\u00f3n de slots y b\u00fasqueda RAG. Ambas son I/O
-  // async; ejecutarlas en serie a\u00f1adir\u00eda ~2s. El RAG s\u00f3lo se lanza si
-  // el mensaje parece pregunta de conocimiento y hay tenant real.
+  // async; ejecutarlas en serie a\u00f1adir\u00eda ~2s. El RAG se lanza SIEMPRE
+  // salvo que el mensaje sea trivialmente un slot esperado (yes/no,
+  // n\u00famero corto, palabra suelta). No usamos allowlist de keywords
+  // porque cada tenant tiene vocabulario distinto (hoteler\u00eda, legal,
+  // salud, retail...). El gate anti-alucinaci\u00f3n
+  // (MIN_SCORE_FOR_ANSWER=0.3 + fallback honesto en rag.ts) ya rechaza
+  // queries irrelevantes con respuesta pruden te.
   const needsRag =
-    runtimeConfig.tenantId !== "fallback" && looksLikeKnowledgeQuery(userMessage);
+    runtimeConfig.tenantId !== "fallback" && !looksLikeSlotAnswer(userMessage);
   const [slots, ragAnswer] = await Promise.all([
     extractSlots(env, userMessage, context, runtimeConfig),
     needsRag ? resolveRagAnswer(env, runtimeConfig, userMessage) : Promise.resolve(undefined),
@@ -214,26 +219,29 @@ function retryPrompt(dialogState: string, fallbackMessage: string): string {
 // overhead (embedding + query + LLM ~1-2s) cuando el mensaje es solo un
 // nombre, un tel\u00e9fono o una confirmaci\u00f3n. Copia local para no
 // exportar la del DO.
-// Heur\u00edstica multi-vertical: matchea intent de "quiero saber sobre X".
-// Cubre verbos gen\u00e9ricos (saber, conocer, contar, explicar, dime),
-// pronombres interrogativos (qu\u00e9, cu\u00e1l, c\u00f3mo, d\u00f3nde, cu\u00e1nto),
-// y sustantivos comunes de discovery empresarial (reconocimientos,
-// estrategia, valor, misi\u00f3n, visi\u00f3n, equipo, certificaciones, experiencia,
-// soluciones, tecnolog\u00eda, empresa, servicios, productos) + verticales
-// (hoteler\u00eda, salud, retail, educaci\u00f3n, gobierno). Si dudas, deja pasar
-// \u2014 el gate anti-alucinaci\u00f3n de score m\u00ednimo se encarga de rechazar
-// preguntas irrelevantes con fallback honesto.
-function looksLikeKnowledgeQuery(message: string): boolean {
-  if (message.length < 6) return false;
-  const m = message.toLowerCase();
-  // Verbos e intents de "quiero saber / cu\u00e9ntame / dime / explica"
-  if (/\b(quiero saber|me interesa saber|puedes decirme|quiero conocer|dime|dime m[aá]s|cu[eé]ntame|explica|expl[ií]came|platicame|plat[ií]came|h[aá]blame|sabe[rn]|conocer|saber sobre|informaci[oó]n sobre|informame|infoacerca|acerca de|sobre su|sobre sus|sobre el|sobre la|sobre los|sobre las)\b/i.test(m)) return true;
-  // Pronombres interrogativos
-  if (/\b(qu[eé]|cu[aá]l|cu[aá]les|d[oó]nde|c[oó]mo|cu[aá]ndo|por qu[eé]|para qu[eé]|cu[aá]nto|cu[aá]ntos|cu[aá]ntas)\b/i.test(m)) return true;
-  // Sustantivos universales de discovery
-  if (/\b(reconocimiento|reconocimientos|premio|premios|estrategia|estrategias|valor|valores|visi[oó]n|misi[oó]n|prop[oó]sito|equipo|equipos|nosotros|acerca|empresa|compa[nñ][ií]a|firma|hist[oó]ria|historia|trayectoria|experiencia|especialidad|especialidades|certificaci[oó]n|certificaciones|acreditaci[oó]n|acreditaciones|alianza|alianzas|partner|partners|socio|socios|cliente|clientes|caso|casos|proyecto|proyectos|tecnolog[ií]a|tecnolog[ií]as|soluci[oó]n|soluciones|servicio|servicios|producto|productos|catalogo|cat[aá]logo|industria|industrias|sector|sectores|\u00e1rea|\u00e1reas|area|areas|pr[aá]ctica|pr[aá]cticas|especial|beneficio|beneficios|membres[ií]a|membres[ií]as|paquete|paquetes|oferta|ofertas|promoci[oó]n|promociones|descuento|descuentos|precio|precios|costo|costos|tarifa|tarifas|contacto|contactos|direcci[oó]n|ubicaci[oó]n|sucursal|sucursales|horario|horarios|tel[eé]fono|correo|email|whatsapp)\b/i.test(m)) return true;
-  // Verticales espec\u00edficas (hoteler\u00eda, salud, retail, educaci\u00f3n)
-  if (/\b(habitaci[oó]n|habitaciones|cuarto|cuartos|suite|suites|alberca|spa|estacionamiento|wifi|mascota|mascotas|desayuno|check-?in|reserva|reservas|hotel|hoteles|resort|resorts|doctor|doctora|especialista|especialistas|cl[ií]nica|hospital|carrera|carreras|curso|cursos|programa|programas|admisi[oó]n|tramite|tr[aá]mite|permiso|licencia)\b/i.test(m)) return true;
+// Heur\u00edstica ESTRUCTURAL multitenant. En vez de allowlist de keywords
+// (que romp\u00eda con cada vertical nuevo), detectamos si el mensaje es
+// trivialmente una respuesta a un slot esperado. Si NO lo es, corremos
+// RAG y dejamos que el score m\u00ednimo + fallback honesto decida.
+//
+// Retorna true (skip RAG) cuando el mensaje es:
+//   - S\u00ed / No / OK / Gracias / etc. (afirmaciones cortas)
+//   - Un solo n\u00famero (tel\u00e9fono, cantidad, hora)
+//   - Muy corto (<6 chars) sin signos de interrogaci\u00f3n
+//   - Solo una fecha/hora (parseable como tiempo)
+//
+// Todo lo dem\u00e1s dispara RAG. El vector search es barato y filtered by
+// tenant, y el gate MIN_SCORE_FOR_ANSWER descarta si no hay match real.
+function looksLikeSlotAnswer(message: string): boolean {
+  const m = message.trim();
+  if (!m) return true;
+  // Confirmaciones/negaciones/agradecimientos cortos
+  if (/^(s[ií]|no|ok|okey|okay|correcto|as[ií] es|efectivamente|claro|por supuesto|gracias|adi[oó]s|nada m[aá]s|est[aá] bien|de acuerdo|listo|entendido)[\s.!?,]*$/i.test(m)) return true;
+  // Solo n\u00fameros (tel\u00e9fono, cantidad, hora suelta)
+  if (/^[\d\s\-+().]+$/.test(m) && m.replace(/\D/g, "").length >= 3) return true;
+  // Muy corto sin signo de pregunta \u2014 probablemente nombre o palabra suelta
+  if (m.length < 6 && !/[?¿]/.test(m)) return true;
+  // Todo lo dem\u00e1s: intentar RAG
   return false;
 }
 
