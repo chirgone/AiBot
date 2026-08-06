@@ -1,4 +1,5 @@
 import { flowTemplates, getTemplateById, getTemplatesForVertical, type FlowTemplate } from "./flow-templates";
+import { indexKnowledgeSource } from "./ai/rag";
 
 interface AdminIdentity {
   email: string;
@@ -525,6 +526,19 @@ async function scanKnowledgeSources(env: Env, tenantId: string): Promise<{ ok: b
         .bind(page.title, page.summary, source.id)
         .run();
       scanned += 1;
+
+      // Vectorize (fase 2): indexamos el fragmento inmediatamente
+      // despu\u00e9s de persistirlo. Si falla, no interrumpe el scan — FTS5
+      // sigue funcionando como fallback. Idempotente v\u00eda upsert.
+      if (env.RAG_ENABLED === "true" && page.summary) {
+        await indexKnowledgeSource(env, {
+          id: source.id,
+          tenantId,
+          url: source.url,
+          title: page.title,
+          summary: page.summary,
+        });
+      }
     } catch (error) {
       await env.DB.prepare(
         `UPDATE knowledge_sources
@@ -592,7 +606,7 @@ async function createSmartFlowFromKnowledge(env: Env, tenantId: string): Promise
     .first<{ name: string; vertical: string; language: string; timezone: string }>();
   if (!tenant) return;
 
-  const [services, latestFlow] = await Promise.all([
+  const [services, latestFlow, sources] = await Promise.all([
     env.DB.prepare(
       `SELECT name, description
          FROM tenant_services
@@ -611,6 +625,12 @@ async function createSmartFlowFromKnowledge(env: Env, tenantId: string): Promise
     )
       .bind(tenantId)
       .first<{ settings: string | null }>(),
+    env.DB.prepare(
+      `SELECT url, title FROM knowledge_sources
+        WHERE tenant_id = ? AND status = 'scanned'`,
+    )
+      .bind(tenantId)
+      .all<{ url: string; title: string | null }>(),
   ]);
 
   const serviceRows = services.results ?? [];
@@ -622,6 +642,15 @@ async function createSmartFlowFromKnowledge(env: Env, tenantId: string): Promise
   const serviceList = serviceNames.slice(0, 6).join(", ");
   const primaryService = serviceNames[0] ?? "asesoría";
 
+  // Menu topics: agrupamos las URLs y titulos escaneados en 3-4 buckets
+  // amplios que el bot puede ofrecer despu\u00e9s del nombre. La idea es
+  // "\u00bfSobre qu\u00e9 te ayudo: X, Y o Z?" en lugar de listar 12 servicios.
+  const menuTopics = deriveMenuTopics(sources.results ?? [], serviceNames);
+
+  const menuLine = menuTopics.length >= 2
+    ? ` Te puedo ayudar con ${joinWithOr(menuTopics)}, o si prefieres, con otra cosa.`
+    : "";
+
   await createFlowDraft(
     env,
     tenantId,
@@ -631,14 +660,19 @@ async function createSmartFlowFromKnowledge(env: Env, tenantId: string): Promise
       level: "recommended",
       name: "Flow inteligente post-scan",
       description: "Draft generado a partir de los servicios detectados durante el escaneo del sitio.",
-      greeting: `Gracias por llamar a ${tenant.name}. Soy ${assistantName}. Veo que normalmente ayudamos con ${serviceList}. ¿Me compartes tu nombre para orientarte mejor?`,
+      greeting: `Gracias por llamar a ${tenant.name}. Soy ${assistantName}. ¿Me compartes tu nombre para orientarte mejor?`,
       confirmationTemplate: `Confirmo una solicitud para {nombre_cliente}, {fecha_hora}, sobre {motivo}. La intención es conectar tu necesidad con el área correcta de ${tenant.name}. ¿Es correcto?`,
       completionMessage: "Listo, tu solicitud quedó registrada con el contexto del servicio que buscas. El equipo adecuado dará seguimiento.",
       fallbackMessage: `Perdón, quiero ubicar bien el servicio que necesitas. Puede ser algo como ${primaryService}. ¿Me lo repites en una frase corta?`,
-      speechHints: [...new Set(["asesoría", "consulta", "servicio", "cita", "seguimiento", ...serviceNames])].slice(0, 40),
+      speechHints: [...new Set(["asesoría", "consulta", "servicio", "cita", "seguimiento", ...serviceNames, ...menuTopics])].slice(0, 40),
       steps: [
         { slotKey: "nombre_cliente", prompt: "¿Me compartes tu nombre, por favor?" },
-        { slotKey: "motivo", prompt: `¿Qué servicio necesitas? Puedes mencionar alguno como ${serviceList}.` },
+        {
+          slotKey: "motivo",
+          prompt: menuLine
+            ? `Perfecto.${menuLine} ¿Qu\u00e9 necesitas?`
+            : `¿Qué servicio necesitas? Puedes mencionar alguno como ${serviceList}.`,
+        },
         { slotKey: "fecha_hora", prompt: "¿Qué día y hora te funciona para que el equipo te contacte?" },
       ],
     },
@@ -646,7 +680,49 @@ async function createSmartFlowFromKnowledge(env: Env, tenantId: string): Promise
     tenant.language,
     tenant.timezone,
     assistantName,
+    menuTopics,
   );
+}
+
+// Buckets sem\u00e1nticos comunes en negocios LATAM. Cada bucket tiene
+// patrones que matcheamos contra URLs y t\u00edtulos escaneados. Devolvemos
+// s\u00f3lo los buckets que tengan al menos una p\u00e1gina.
+const MENU_BUCKETS: Array<{ label: string; patterns: RegExp[] }> = [
+  { label: "servicios", patterns: [/servicio|solution|soluci[oó]n|producto|platform|plataforma/i] },
+  { label: "instalaciones y horarios", patterns: [/instalaci[oó]n|horario|ubicaci[oó]n|sucursal|contacto|contact|direcci[oó]n/i] },
+  { label: "precios y promociones", patterns: [/precio|price|tarifa|promoci[oó]n|promo|oferta|descuento|paquete/i] },
+  { label: "preguntas frecuentes", patterns: [/faq|preguntas|frecuentes|ayuda|soporte|support/i] },
+  { label: "amenidades y experiencias", patterns: [/amenidad|experiencia|actividad|alberca|spa|restaurante|habitaci[oó]n/i] },
+  { label: "\u00e1reas de pr\u00e1ctica", patterns: [/practica|pr[aá]ctica|area de pr|areas de pr|derecho|legal/i] },
+  { label: "casos y resultados", patterns: [/caso|resultado|portafolio|clientes|testimon/i] },
+];
+
+function deriveMenuTopics(
+  sources: Array<{ url: string; title: string | null }>,
+  serviceNames: string[],
+): string[] {
+  const hits = new Set<string>();
+  for (const source of sources) {
+    const haystack = `${source.url} ${source.title ?? ""}`.toLowerCase();
+    for (const bucket of MENU_BUCKETS) {
+      if (bucket.patterns.some((pattern) => pattern.test(haystack))) {
+        hits.add(bucket.label);
+      }
+    }
+  }
+  const topics = Array.from(hits);
+  // Si no detectamos buckets pero s\u00ed hay servicios, usamos "servicios"
+  // como fallback \u00fanico.
+  if (!topics.length && serviceNames.length) {
+    topics.push("servicios");
+  }
+  return topics.slice(0, 4);
+}
+
+function joinWithOr(items: string[]): string {
+  if (items.length <= 1) return items.join("");
+  if (items.length === 2) return `${items[0]} o ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")} o ${items.at(-1)}`;
 }
 
 async function upsertVoiceChannel(env: Env, tenantId: string, voiceNumber?: string): Promise<void> {
@@ -697,7 +773,7 @@ function buildFlowDraft(input: SaveFlowInput, businessName: string, vertical: st
   return { error: "templateId or customFlow required" };
 }
 
-async function createFlowDraft(env: Env, tenantId: string, template: FlowTemplate, businessName: string, language: string, timezone: string, assistantName: string): Promise<string> {
+async function createFlowDraft(env: Env, tenantId: string, template: FlowTemplate, businessName: string, language: string, timezone: string, assistantName: string, menuTopics: string[] = []): Promise<string> {
   // UPSERT semantics: cada tenant tiene exactamente un draft por canal. El
   // \u00edndice parcial idx_agent_flows_one_draft (migration 0003) garantiza la
   // invariante a nivel D1; aqu\u00ed reutilizamos la fila existente si existe para
@@ -723,6 +799,7 @@ async function createFlowDraft(env: Env, tenantId: string, template: FlowTemplat
     template_name: template.name,
   });
   const speechHintsJson = JSON.stringify(template.speechHints);
+  const menuTopicsJson = JSON.stringify(menuTopics);
   const version = `1.0.${Date.now()}`;
 
   if (existing) {
@@ -735,6 +812,7 @@ async function createFlowDraft(env: Env, tenantId: string, template: FlowTemplat
               fallback_message = ?,
               speech_hints = ?,
               settings = ?,
+              menu_topics = ?,
               updated_at = strftime('%s','now')
         WHERE id = ?`,
     )
@@ -746,6 +824,7 @@ async function createFlowDraft(env: Env, tenantId: string, template: FlowTemplat
         template.fallbackMessage,
         speechHintsJson,
         settingsJson,
+        menuTopicsJson,
         flowId,
       )
       .run();
@@ -754,8 +833,8 @@ async function createFlowDraft(env: Env, tenantId: string, template: FlowTemplat
   } else {
     await env.DB.prepare(
       `INSERT INTO agent_flows (
-         id, tenant_id, channel, version, status, greeting, confirmation_template, completion_message, fallback_message, speech_hints, settings
-       ) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)`,
+         id, tenant_id, channel, version, status, greeting, confirmation_template, completion_message, fallback_message, speech_hints, settings, menu_topics
+       ) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         flowId,
@@ -768,6 +847,7 @@ async function createFlowDraft(env: Env, tenantId: string, template: FlowTemplat
         template.fallbackMessage,
         speechHintsJson,
         settingsJson,
+        menuTopicsJson,
       )
       .run();
   }

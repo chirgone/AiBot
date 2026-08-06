@@ -64,7 +64,8 @@ export async function resolveRuntimeConfig(env: Env, toPhone?: string): Promise<
               af.completion_message,
               af.fallback_message,
               af.speech_hints,
-              af.settings
+              af.settings,
+              af.menu_topics
          FROM tenant_channels tc
          JOIN tenants t ON t.id = tc.tenant_id
          LEFT JOIN knowledge_profiles kp ON kp.tenant_id = t.id
@@ -73,7 +74,7 @@ export async function resolveRuntimeConfig(env: Env, toPhone?: string): Promise<
         LIMIT 1`,
     )
       .bind(toPhone)
-      .first<TenantRuntimeRow & { flow_id: string | null; flow_version: string | null }>();
+      .first<TenantRuntimeRow & { flow_id: string | null; flow_version: string | null; menu_topics: string | null }>();
 
     if (!row) {
       console.log(
@@ -142,6 +143,7 @@ export async function resolveRuntimeConfig(env: Env, toPhone?: string): Promise<
         description: service.description,
         keywords: parseStringArray(service.keywords, []),
       })),
+      menuTopics: parseStringArray(row.menu_topics, []),
       speechTimeout: stringFromOptional(settings.speechTimeout),
       timeout: stringFromOptional(settings.timeout),
       notifyWebhookUrl: row.notify_webhook_url ?? undefined,
@@ -252,7 +254,7 @@ async function deliverLeadNotification(
     });
     const headers: Record<string, string> = {
       "content-type": "application/json",
-      "user-agent": "AngaFlow-Voice/1.4",
+      "user-agent": "AngaFlow-Voice/1.5",
     };
     if (config.notifyWebhookSecret) {
       headers["x-angaflow-signature"] = await hmacSha256Hex(config.notifyWebhookSecret, body);
@@ -317,6 +319,7 @@ function fallbackRuntimeConfig(env: Env): RuntimePromptConfig {
     knowledgeSummary:
       "AngaFlow configura bots y agentes conversacionales multi-tenant para capturar, calificar y escalar conversaciones de negocio.",
     services: [],
+    menuTopics: [],
   };
 }
 

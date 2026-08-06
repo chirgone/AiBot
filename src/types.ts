@@ -1,6 +1,8 @@
 export type DialogState =
   | "greeting"
+  | "topic_menu"
   | "collecting_info"
+  | "answering_question"
   | "confirming"
   | "booked"
   | "cancelled"
@@ -48,6 +50,7 @@ export interface RuntimePromptConfig {
   prompts: Partial<Record<keyof ConversationSlots, string>>;
   knowledgeSummary: string;
   services: Array<{ name: string; description: string; keywords: string[] }>;
+  menuTopics: string[];
   speechTimeout?: string;
   timeout?: string;
   notifyWebhookUrl?: string;

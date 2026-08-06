@@ -13,6 +13,15 @@ interface ConversationRow extends Record<string, SqlStorageValue> {
   urgent: number;
   urgency_phrase: string | null;
   turn_count: number;
+  pre_qa_state: DialogState | null;
+}
+
+// RagAnswer inyectado por el worker antes de processTurn. Contiene la
+// respuesta ya reformulada por Workers AI. El DO decide c\u00f3mo integrarla
+// con el flujo (mantener estado, retomar slot, etc.).
+export interface InjectedRagAnswer {
+  answer: string;
+  origin: "vectorize" | "fts5" | "like";
 }
 
 export class VoiceAgent extends DurableObject<Env> {
@@ -31,6 +40,7 @@ export class VoiceAgent extends DurableObject<Env> {
           urgent INTEGER NOT NULL DEFAULT 0,
           urgency_phrase TEXT,
           turn_count INTEGER NOT NULL DEFAULT 0,
+          pre_qa_state TEXT,
           created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
           updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
           last_message_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
@@ -61,14 +71,19 @@ export class VoiceAgent extends DurableObject<Env> {
         CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(fecha_hora);
       `);
 
-      // Migracion idempotente: DOs creados antes de v1.4.0 no tienen turn_count.
+      // Migracion idempotente: DOs creados antes de v1.4.0 no tienen turn_count,
+      // ni pre_qa_state (v1.5.0). Comprobamos ambos en una sola pasada.
       const columns = this.ctx.storage.sql
         .exec<{ name: string }>(`PRAGMA table_info(conversations)`)
         .toArray();
-      if (!columns.some((column) => column.name === "turn_count")) {
+      const columnNames = new Set(columns.map((column) => column.name));
+      if (!columnNames.has("turn_count")) {
         this.ctx.storage.sql.exec(
           `ALTER TABLE conversations ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0`,
         );
+      }
+      if (!columnNames.has("pre_qa_state")) {
+        this.ctx.storage.sql.exec(`ALTER TABLE conversations ADD COLUMN pre_qa_state TEXT`);
       }
     });
   }
@@ -107,7 +122,7 @@ export class VoiceAgent extends DurableObject<Env> {
     userMessage: string,
     extractedSlots: Partial<ConversationSlots>,
     runtimeConfig?: RuntimePromptConfig,
-    options?: { maxTurns?: number },
+    options?: { maxTurns?: number; ragAnswer?: InjectedRagAnswer },
   ): Promise<ProcessTurnResult> {
     const row = this.getConversationRow(callSid);
     if (!row) {
@@ -115,6 +130,9 @@ export class VoiceAgent extends DurableObject<Env> {
     }
 
     const currentSlots = toContext(row).slots;
+    // Q&A path prioridad 1: si el usuario pregunta algo espec\u00edfico y matchea
+    // un servicio conocido, respondemos con la l\u00f3gica antigua. Prioridad 2:
+    // si el worker ya trajo un fragmento RAG, lo usamos.
     const knowledgeAnswer = answerKnowledgeQuestion(userMessage, runtimeConfig);
     const incomingSlots = sanitizeIncomingSlots(currentSlots, extractedSlots, userMessage);
     const slots = mergeSlots(currentSlots, {
@@ -131,7 +149,7 @@ export class VoiceAgent extends DurableObject<Env> {
     const maxTurns = options?.maxTurns ?? 12;
     const turnLimitReached = nextTurnCount >= maxTurns;
 
-    let result = this.nextTurn(row.dialog_state, currentSlots, slots, userMessage, runtimeConfig);
+    let result = this.nextTurn(row.dialog_state, currentSlots, slots, userMessage, runtimeConfig, options?.ragAnswer);
 
     // Limite de turnos: si el usuario no completo antes del maximo, cerramos la
     // llamada con un mensaje amable. Registramos como cancelled para no marcar
@@ -154,9 +172,19 @@ export class VoiceAgent extends DurableObject<Env> {
       JSON.stringify(extractedSlots),
     );
 
+    // pre_qa_state: cuando entramos a answering_question, guardamos el
+    // estado previo para retomarlo el siguiente turno. Cuando salimos,
+    // limpiamos.
+    let nextPreQaState: DialogState | null = row.pre_qa_state;
+    if (result.dialogState === "answering_question" && row.dialog_state !== "answering_question") {
+      nextPreQaState = row.dialog_state;
+    } else if (result.dialogState !== "answering_question") {
+      nextPreQaState = null;
+    }
+
     this.ctx.storage.sql.exec(
       `UPDATE conversations
-       SET dialog_state = ?, nombre_cliente = ?, telefono = ?, fecha_hora = ?, motivo = ?, urgent = ?, urgency_phrase = ?, turn_count = ?, updated_at = strftime('%s','now'), last_message_at = strftime('%s','now')
+       SET dialog_state = ?, nombre_cliente = ?, telefono = ?, fecha_hora = ?, motivo = ?, urgent = ?, urgency_phrase = ?, turn_count = ?, pre_qa_state = ?, updated_at = strftime('%s','now'), last_message_at = strftime('%s','now')
        WHERE id = ?`,
       result.dialogState,
       slots.nombre_cliente ?? null,
@@ -166,6 +194,7 @@ export class VoiceAgent extends DurableObject<Env> {
       urgent ? 1 : 0,
       urgencyPhrase,
       nextTurnCount,
+      nextPreQaState,
       callSid,
     );
 
@@ -223,7 +252,7 @@ export class VoiceAgent extends DurableObject<Env> {
   private getConversationRow(callSid: string): ConversationRow | undefined {
     return this.ctx.storage.sql
       .exec<ConversationRow>(
-        `SELECT id, phone_number, dialog_state, nombre_cliente, telefono, fecha_hora, motivo, urgent, urgency_phrase, turn_count
+        `SELECT id, phone_number, dialog_state, nombre_cliente, telefono, fecha_hora, motivo, urgent, urgency_phrase, turn_count, pre_qa_state
          FROM conversations WHERE id = ?`,
         callSid,
       )
@@ -262,6 +291,7 @@ export class VoiceAgent extends DurableObject<Env> {
     slots: ConversationSlots,
     userMessage: string,
     runtimeConfig?: RuntimePromptConfig,
+    ragAnswer?: InjectedRagAnswer,
   ): ProcessTurnResult {
     if (isCancellation(userMessage)) {
       return {
@@ -272,6 +302,7 @@ export class VoiceAgent extends DurableObject<Env> {
       };
     }
 
+    // Prioridad 1: match directo con un servicio conocido (r\u00e1pido, sin AI).
     const knowledgeAnswer = answerKnowledgeQuestion(userMessage, runtimeConfig);
     if (knowledgeAnswer) {
       const inferredService = knowledgeAnswer.serviceName;
@@ -280,6 +311,23 @@ export class VoiceAgent extends DurableObject<Env> {
         responseText: limitVoiceText(`${knowledgeAnswer.responseText} ${nextPrompt}`, 420),
         dialogState: "collecting_info",
         missingSlots: getMissingSlots({ ...slots, motivo: slots.motivo ?? inferredService }),
+        isComplete: false,
+      };
+    }
+
+    // Prioridad 2: RAG. El worker ya hizo la b\u00fasqueda y reformulaci\u00f3n; s\u00f3lo
+    // integramos la respuesta y retomamos el flujo pidiendo el siguiente slot.
+    // Marcamos estado 'answering_question' para el registro; el siguiente
+    // turno vuelve a collecting_info porque los slots faltantes no cambiaron.
+    if (ragAnswer && looksLikeKnowledgeQuestion(userMessage)) {
+      const missing = getMissingSlots(slots);
+      const followUp = missing.length
+        ? ` ${promptForSlot(missing[0], slots, runtimeConfig)}`
+        : "";
+      return {
+        responseText: limitVoiceText(`${ragAnswer.answer}${followUp}`, 420),
+        dialogState: "answering_question",
+        missingSlots: missing,
         isComplete: false,
       };
     }

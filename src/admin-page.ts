@@ -459,7 +459,7 @@ function adminHtml(email: string): string {
   <body>
     <header>
       <div>
-        <span class="pill">Estudio Conversacional AngaFlow · v1.4.0</span>
+        <span class="pill">Estudio Conversacional AngaFlow · v1.5.0</span>
         <h1>Crea bots conversacionales desde la web de cada negocio.</h1>
         <p class="hero-copy">Selecciona una vertical, carga la URL raíz, escanea rutas corporativas y publica un flujo conversacional listo para voz, chat o WhatsApp.</p>
       </div>
