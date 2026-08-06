@@ -1,0 +1,19 @@
+migrations/0006_soft_delete.sql
+  s_951cf48e08fd97::t_06c98a53fb3423 1-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "612a83649f4bfd3f412fdff04772f9a68b218148",
+  "prompts": {},
+  "sessions": {
+    "s_951cf48e08fd97": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_069315609ffeNWss1vxP3W35A8",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Ivan Anguiano <jose301184@gmail.com>"
+    }
+  }
+}
