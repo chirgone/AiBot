@@ -1,0 +1,19 @@
+src/ai/rag.ts
+  s_951cf48e08fd97::t_ea59d39c1a4c01 42-51,131-149,162-170,174,177,333-334,340
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6191890f7a98d2ca4bb8bc1cbb8281629e650375",
+  "prompts": {},
+  "sessions": {
+    "s_951cf48e08fd97": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_069315609ffeNWss1vxP3W35A8",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Ivan Anguiano <jose301184@gmail.com>"
+    }
+  }
+}
