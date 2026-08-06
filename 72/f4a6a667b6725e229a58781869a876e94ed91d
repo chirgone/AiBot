@@ -1,0 +1,23 @@
+src/admin-api.ts
+  s_951cf48e08fd97::t_50aef32728085e 93,133-142,148-153,155-185,197-226,353-364,368-369,1257-1263,1265-1266,1269-1272,1274-1293
+src/admin-page.ts
+  s_951cf48e08fd97::t_160386d2237bf5 243-245,258-297,798,801,806-811,826-846,849-891,1068-1096,1135-1138,1140-1151,1312-1315,1323-1351,1393
+src/index.ts
+  s_951cf48e08fd97::t_52e4935e39fda5 35,57,59,71-75,217-225,227-237
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "72f4a6a667b6725e229a58781869a876e94ed91d",
+  "prompts": {},
+  "sessions": {
+    "s_951cf48e08fd97": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_069315609ffeNWss1vxP3W35A8",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Ivan Anguiano <jose301184@gmail.com>"
+    }
+  }
+}
