@@ -37,6 +37,8 @@ interface UpdateTenantInput {
   country?: string;
   timezone?: string;
   language?: string;
+  notifyWebhookUrl?: string | null;
+  notifyWebhookSecret?: string | null;
 }
 
 interface SaveFlowInput {
@@ -173,7 +175,8 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
   if (request.method === "GET" && !action) {
     const tenant = await env.DB.prepare(
       `SELECT id, name, slug, vertical, country, timezone, language, status, solution_type, website,
-              brand_voice_profile, behavior_profile, handoff_rules, memory_policy, learning_policy
+              brand_voice_profile, behavior_profile, handoff_rules, memory_policy, learning_policy,
+              notify_webhook_url, notify_webhook_secret
          FROM tenants
         WHERE id = ?`,
     )
@@ -197,17 +200,66 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
       return json({ error: "Valid business URL required" }, 400);
     }
 
+    // Notify webhook: null-string explicito borra la config; undefined la
+    // preserva; string no vacio valida y actualiza.
+    const notifyUrlInput = input.notifyWebhookUrl;
+    let notifyUrl: string | null | undefined;
+    if (notifyUrlInput === undefined) {
+      notifyUrl = undefined;
+    } else if (notifyUrlInput === null || notifyUrlInput.trim() === "") {
+      notifyUrl = null;
+    } else {
+      const trimmed = notifyUrlInput.trim();
+      if (!isHttpUrl(trimmed)) {
+        return json({ error: "notifyWebhookUrl must be http/https" }, 400);
+      }
+      notifyUrl = trimmed;
+    }
+
+    const notifySecretInput = input.notifyWebhookSecret;
+    let notifySecret: string | null | undefined;
+    if (notifySecretInput === undefined) {
+      notifySecret = undefined;
+    } else if (notifySecretInput === null || notifySecretInput.trim() === "") {
+      notifySecret = null;
+    } else {
+      notifySecret = notifySecretInput.trim();
+    }
+
     await env.DB.prepare(
       `UPDATE tenants
-          SET name = ?, slug = ?, vertical = COALESCE(?, vertical), website = ?, country = COALESCE(?, country), timezone = COALESCE(?, timezone), language = COALESCE(?, language), updated_at = strftime('%s','now')
+          SET name = ?, slug = ?, vertical = COALESCE(?, vertical), website = ?, country = COALESCE(?, country), timezone = COALESCE(?, timezone), language = COALESCE(?, language),
+              notify_webhook_url = CASE WHEN ? = 1 THEN notify_webhook_url ELSE ? END,
+              notify_webhook_secret = CASE WHEN ? = 1 THEN notify_webhook_secret ELSE ? END,
+              updated_at = strftime('%s','now')
         WHERE id = ?`,
     )
-      .bind(name, slugify(name), input.vertical?.trim() || null, website, input.country?.trim() || null, input.timezone?.trim() || null, input.language?.trim() || null, tenantId)
+      .bind(
+        name,
+        slugify(name),
+        input.vertical?.trim() || null,
+        website,
+        input.country?.trim() || null,
+        input.timezone?.trim() || null,
+        input.language?.trim() || null,
+        notifyUrl === undefined ? 1 : 0,
+        notifyUrl ?? null,
+        notifySecret === undefined ? 1 : 0,
+        notifySecret ?? null,
+        tenantId,
+      )
       .run();
 
     await upsertVoiceChannel(env, tenantId, input.voiceNumber?.trim());
 
-    await audit(env, tenantId, identity.email, "tenant.update", { name, vertical: input.vertical, website, voiceNumber: input.voiceNumber });
+    await audit(env, tenantId, identity.email, "tenant.update", {
+      name,
+      vertical: input.vertical,
+      website,
+      voiceNumber: input.voiceNumber,
+      notifyWebhookUrlChanged: notifyUrl !== undefined,
+      notifyWebhookSecretChanged: notifySecret !== undefined,
+    });
     return json({ ok: true });
   }
 
@@ -778,14 +830,43 @@ async function refreshKnowledgeProfile(env: Env, tenantId: string): Promise<void
     .run();
 
   const serviceCandidates = sourceRows.filter((source) => isLikelyServiceUrl(source.url) || /servicio|solution|soluci[oó]n|producto|platform|plataforma/i.test(source.title ?? ""));
-  await env.DB.prepare("DELETE FROM tenant_services WHERE tenant_id = ?").bind(tenantId).run();
   const detectedServices = uniqueServices(serviceCandidates.flatMap((source) => servicesFromSource(source))).slice(0, 20);
+  const detectedNames = detectedServices.map((service) => service.name);
+
+  // UPSERT por (tenant_id, name): actualiza descripcion/keywords/priority sin
+  // duplicar filas ni perder ids historicos. La invariante la respalda el
+  // indice unico idx_tenant_services_tenant_name (migration 0004).
   for (const [index, service] of detectedServices.entries()) {
     await env.DB.prepare(
       `INSERT INTO tenant_services (id, tenant_id, name, description, keywords, priority, source_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(tenant_id, name) DO UPDATE SET
+         description = excluded.description,
+         keywords = excluded.keywords,
+         priority = excluded.priority,
+         source_url = excluded.source_url`,
     )
-      .bind(`service_${crypto.randomUUID()}`, tenantId, service.name, service.description, JSON.stringify(extractKeywords(`${service.name} ${service.description}`)), (index + 1) * 10, service.sourceUrl)
+      .bind(
+        `service_${crypto.randomUUID()}`,
+        tenantId,
+        service.name,
+        service.description,
+        JSON.stringify(extractKeywords(`${service.name} ${service.description}`)),
+        (index + 1) * 10,
+        service.sourceUrl,
+      )
+      .run();
+  }
+
+  // Purga servicios detectados en scans anteriores que ya no aparecen. Evita
+  // que servicios stale queden como "activos" y desalinien el catalogo con el
+  // sitio real. Sin nombres, no-op para no borrar catalogo manual.
+  if (detectedNames.length) {
+    const placeholders = detectedNames.map(() => "?").join(",");
+    await env.DB.prepare(
+      `DELETE FROM tenant_services WHERE tenant_id = ? AND name NOT IN (${placeholders})`,
+    )
+      .bind(tenantId, ...detectedNames)
       .run();
   }
 }

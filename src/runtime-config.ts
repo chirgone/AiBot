@@ -12,6 +12,8 @@ interface TenantRuntimeRow {
   fallback_message: string | null;
   speech_hints: string | null;
   settings: string | null;
+  notify_webhook_url: string | null;
+  notify_webhook_secret: string | null;
 }
 
 interface ServiceRow {
@@ -52,6 +54,8 @@ export async function resolveRuntimeConfig(env: Env, toPhone?: string): Promise<
               t.name AS tenant_name,
               t.timezone,
               t.language,
+              t.notify_webhook_url,
+              t.notify_webhook_secret,
               kp.business_summary,
               af.id AS flow_id,
               af.version AS flow_version,
@@ -138,6 +142,10 @@ export async function resolveRuntimeConfig(env: Env, toPhone?: string): Promise<
         description: service.description,
         keywords: parseStringArray(service.keywords, []),
       })),
+      speechTimeout: stringFromOptional(settings.speechTimeout),
+      timeout: stringFromOptional(settings.timeout),
+      notifyWebhookUrl: row.notify_webhook_url ?? undefined,
+      notifyWebhookSecret: row.notify_webhook_secret ?? undefined,
     };
   } catch (error) {
     console.warn(
@@ -157,6 +165,7 @@ export async function recordConfirmedLead(
   phone: string,
   slots: { nombre_cliente?: string; telefono?: string; fecha_hora?: string; motivo?: string },
   urgency?: { urgent?: boolean; phrase?: string },
+  ctx?: ExecutionContext,
 ): Promise<void> {
   if (config.tenantId === "fallback") {
     return;
@@ -168,6 +177,7 @@ export async function recordConfirmedLead(
     metadata.urgencyPhrase = urgency.phrase;
   }
 
+  const leadId = crypto.randomUUID();
   await env.DB.prepare(
     `INSERT INTO leads (id, tenant_id, channel, conversation_id, name, phone, service, requested_at, status, source, metadata, urgent)
      VALUES (?, ?, 'voice', ?, ?, ?, ?, ?, 'confirmed', 'voice', ?, ?)
@@ -182,7 +192,7 @@ export async function recordConfirmedLead(
        updated_at = strftime('%s','now')`,
   )
     .bind(
-      crypto.randomUUID(),
+      leadId,
       config.tenantId,
       conversationId,
       slots.nombre_cliente ?? null,
@@ -193,6 +203,99 @@ export async function recordConfirmedLead(
       urgent,
     )
     .run();
+
+  // Notificacion saliente por tenant. Se corre en waitUntil para no bloquear la
+  // respuesta TwiML. Si el tenant no configuro webhook, no-op.
+  if (config.notifyWebhookUrl) {
+    const notify = deliverLeadNotification(config, {
+      leadId,
+      conversationId,
+      phone: slots.telefono ?? phone,
+      name: slots.nombre_cliente ?? null,
+      service: slots.motivo ?? null,
+      requestedAt: slots.fecha_hora ?? null,
+      urgent: urgent === 1,
+      urgencyPhrase: urgency?.phrase ?? null,
+      timestamp: new Date().toISOString(),
+    });
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(notify);
+    } else {
+      await notify;
+    }
+  }
+}
+
+interface LeadNotificationPayload {
+  leadId: string;
+  conversationId: string;
+  phone: string;
+  name: string | null;
+  service: string | null;
+  requestedAt: string | null;
+  urgent: boolean;
+  urgencyPhrase: string | null;
+  timestamp: string;
+}
+
+async function deliverLeadNotification(
+  config: RuntimePromptConfig,
+  payload: LeadNotificationPayload,
+): Promise<void> {
+  if (!config.notifyWebhookUrl) return;
+  try {
+    const body = JSON.stringify({
+      event: "lead.confirmed",
+      tenantId: config.tenantId,
+      businessName: config.businessName,
+      lead: payload,
+    });
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "user-agent": "AngaFlow-Voice/1.4",
+    };
+    if (config.notifyWebhookSecret) {
+      headers["x-angaflow-signature"] = await hmacSha256Hex(config.notifyWebhookSecret, body);
+    }
+    const response = await fetch(config.notifyWebhookUrl, {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(8_000),
+    });
+    console.log(
+      JSON.stringify({
+        message: "lead notify",
+        tenantId: config.tenantId,
+        leadId: payload.leadId,
+        url: config.notifyWebhookUrl,
+        status: response.status,
+      }),
+    );
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        message: "lead notify failed",
+        tenantId: config.tenantId,
+        leadId: payload.leadId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+}
+
+async function hmacSha256Hex(secret: string, message: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return Array.from(new Uint8Array(mac))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function fallbackRuntimeConfig(env: Env): RuntimePromptConfig {
@@ -239,6 +342,12 @@ function parseStringArray(value: string | null, fallback: string[]): string[] {
 
 function stringFrom(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function stringFromOptional(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return undefined;
 }
 
 function syncAssistantName(greeting: string, assistantName: string): string {

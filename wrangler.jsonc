@@ -60,6 +60,8 @@
     "VOICE": "Polly.Mia-Neural",
     "TIME_ZONE": "America/Mexico_City",
     "AI_MODEL": "@cf/meta/llama-3.1-8b-instruct-fast",
-    "SKIP_SIGNATURE_VALIDATION": "true"
+    "SKIP_SIGNATURE_VALIDATION": "false",
+    "MAX_TURNS_PER_CALL": "12",
+    "MIN_SPEECH_CONFIDENCE": "0.4"
   }
 }

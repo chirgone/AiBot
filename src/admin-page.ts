@@ -459,7 +459,7 @@ function adminHtml(email: string): string {
   <body>
     <header>
       <div>
-        <span class="pill">Estudio Conversacional AngaFlow · v1.3.1</span>
+        <span class="pill">Estudio Conversacional AngaFlow · v1.4.0</span>
         <h1>Crea bots conversacionales desde la web de cada negocio.</h1>
         <p class="hero-copy">Selecciona una vertical, carga la URL raíz, escanea rutas corporativas y publica un flujo conversacional listo para voz, chat o WhatsApp.</p>
       </div>
@@ -536,6 +536,10 @@ function adminHtml(email: string): string {
                       <input id="tenantAssistantName" type="text" placeholder="Ej. Ana, Lex, Asistente CBR" />
                       <label class="field-label" for="tenantVoiceNumber">Número de voz / Twilio</label>
                       <input id="tenantVoiceNumber" type="tel" inputmode="tel" placeholder="${DEFAULT_VOICE_NUMBER}" />
+                      <label class="field-label" for="tenantNotifyWebhookUrl">Webhook de nuevos prospectos (opcional)</label>
+                      <input id="tenantNotifyWebhookUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://tu-sistema.com/hook/angaflow" />
+                      <label class="field-label" for="tenantNotifyWebhookSecret">Secreto HMAC del webhook (opcional)</label>
+                      <input id="tenantNotifyWebhookSecret" type="text" autocomplete="off" placeholder="Se envía como cabecera X-AngaFlow-Signature" />
                       <div class="actions">
                         <button id="updateTenant" class="secondary" type="button">Guardar negocio</button>
                         <button id="deleteTenant" class="danger" type="button">Borrar negocio</button>
@@ -795,8 +799,18 @@ function adminHtml(email: string): string {
         $('tenantWebsite').value = tenant?.website || '';
         $('tenantVoiceNumber').value = tenant?.voice_number || '';
         if ($('tenantAssistantName')) $('tenantAssistantName').value = tenant ? DEFAULT_ASSISTANT_NAME : '';
-        ['tenantName','tenantVertical','tenantWebsite','tenantAssistantName','tenantVoiceNumber'].forEach(id => $(id).disabled = !tenant);
+        if ($('tenantNotifyWebhookUrl')) $('tenantNotifyWebhookUrl').value = '';
+        if ($('tenantNotifyWebhookSecret')) $('tenantNotifyWebhookSecret').value = '';
+        ['tenantName','tenantVertical','tenantWebsite','tenantAssistantName','tenantVoiceNumber','tenantNotifyWebhookUrl','tenantNotifyWebhookSecret'].forEach(id => { const el = $(id); if (el) el.disabled = !tenant; });
         showNotice('tenantResult', tenant ? 'Seleccionado: ' + tenant.name + '. Puedes editarlo, escanear conocimiento o configurar su flujo.' : 'Selecciona un negocio para modificarlo.', tenant ? 'ok' : 'warn');
+        // Los campos de webhook no vienen en el listado; los cargamos del detail.
+        if (tenant) {
+          api('tenants/' + tenant.id).then((detail) => {
+            if (!detail || !detail.tenant || state.tenantId !== tenant.id) return;
+            if ($('tenantNotifyWebhookUrl')) $('tenantNotifyWebhookUrl').value = detail.tenant.notify_webhook_url || '';
+            if ($('tenantNotifyWebhookSecret')) $('tenantNotifyWebhookSecret').value = detail.tenant.notify_webhook_secret || '';
+          }).catch(() => {});
+        }
       }
 
       function templatesForCurrentTenant() {
@@ -1173,7 +1187,16 @@ function adminHtml(email: string): string {
         if (!hasTenant()) return;
         setBusy('updateTenant', true, 'Guardando...');
         showNotice('tenantResult', 'Guardando negocio...', 'warn');
-        const payload = { name: $('tenantName').value.trim(), vertical: $('tenantVertical').value, website: $('tenantWebsite').value.trim(), voiceNumber: $('tenantVoiceNumber').value.trim() };
+        const webhookInput = $('tenantNotifyWebhookUrl');
+        const secretInput = $('tenantNotifyWebhookSecret');
+        const payload = {
+          name: $('tenantName').value.trim(),
+          vertical: $('tenantVertical').value,
+          website: $('tenantWebsite').value.trim(),
+          voiceNumber: $('tenantVoiceNumber').value.trim(),
+          notifyWebhookUrl: webhookInput ? webhookInput.value.trim() : undefined,
+          notifyWebhookSecret: secretInput ? secretInput.value.trim() : undefined,
+        };
         try {
           await api('tenants/' + state.tenantId, { method: 'PATCH', body: JSON.stringify(payload) });
           if ($('flowGreeting')) {

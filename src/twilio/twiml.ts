@@ -4,18 +4,40 @@ export interface GatherOptions {
   language: string;
   voice: string;
   hints?: string[];
+  speechTimeout?: string;
+  timeout?: string;
 }
 
 export function twimlGather(options: GatherOptions): Response {
+  const speechTimeout = sanitizeSpeechTimeout(options.speechTimeout);
+  const timeout = sanitizeTimeout(options.timeout);
   const body = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="${escapeXml(options.action)}" method="POST" language="${escapeXml(options.language)}" speechTimeout="1" timeout="4" actionOnEmptyResult="true" hints="${escapeXml((options.hints ?? defaultHints).join(","))}">
+  <Gather input="speech" action="${escapeXml(options.action)}" method="POST" language="${escapeXml(options.language)}" speechTimeout="${escapeXml(speechTimeout)}" timeout="${escapeXml(timeout)}" actionOnEmptyResult="true" hints="${escapeXml((options.hints ?? defaultHints).join(","))}">
     <Say voice="${escapeXml(options.voice)}" language="${escapeXml(options.language)}">${escapeXml(shortenForTwilio(options.message))}</Say>
   </Gather>
   <Redirect method="POST">${escapeXml(options.action)}</Redirect>
 </Response>`;
 
   return twimlResponse(body);
+}
+
+// Twilio acepta "auto" o un entero >= 1. Cualquier otra cosa la rechaza.
+function sanitizeSpeechTimeout(value: string | undefined): string {
+  if (!value) return "1";
+  const trimmed = value.trim();
+  if (trimmed.toLowerCase() === "auto") return "auto";
+  const num = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(num) || num < 1 || num > 30) return "1";
+  return String(num);
+}
+
+// timeout de Gather: entero 1-600. Fallback 4s.
+function sanitizeTimeout(value: string | undefined): string {
+  if (!value) return "4";
+  const num = Number.parseInt(value.trim(), 10);
+  if (!Number.isFinite(num) || num < 1 || num > 600) return "4";
+  return String(num);
 }
 
 const defaultHints = [

@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS tenants (
   handoff_rules TEXT NOT NULL DEFAULT '{}',
   memory_policy TEXT NOT NULL DEFAULT '{}',
   learning_policy TEXT NOT NULL DEFAULT '{}',
+  notify_webhook_url TEXT,
+  notify_webhook_secret TEXT,
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
   updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
@@ -62,6 +64,7 @@ CREATE TABLE IF NOT EXISTS tenant_services (
   source_url TEXT,
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_services_tenant_name ON tenant_services(tenant_id, name);
 
 CREATE TABLE IF NOT EXISTS agent_flows (
   id TEXT PRIMARY KEY,

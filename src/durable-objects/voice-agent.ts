@@ -12,6 +12,7 @@ interface ConversationRow extends Record<string, SqlStorageValue> {
   motivo: string | null;
   urgent: number;
   urgency_phrase: string | null;
+  turn_count: number;
 }
 
 export class VoiceAgent extends DurableObject<Env> {
@@ -29,6 +30,7 @@ export class VoiceAgent extends DurableObject<Env> {
           motivo TEXT,
           urgent INTEGER NOT NULL DEFAULT 0,
           urgency_phrase TEXT,
+          turn_count INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
           updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
           last_message_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
@@ -58,6 +60,16 @@ export class VoiceAgent extends DurableObject<Env> {
         );
         CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(fecha_hora);
       `);
+
+      // Migracion idempotente: DOs creados antes de v1.4.0 no tienen turn_count.
+      const columns = this.ctx.storage.sql
+        .exec<{ name: string }>(`PRAGMA table_info(conversations)`)
+        .toArray();
+      if (!columns.some((column) => column.name === "turn_count")) {
+        this.ctx.storage.sql.exec(
+          `ALTER TABLE conversations ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0`,
+        );
+      }
     });
   }
 
@@ -95,6 +107,7 @@ export class VoiceAgent extends DurableObject<Env> {
     userMessage: string,
     extractedSlots: Partial<ConversationSlots>,
     runtimeConfig?: RuntimePromptConfig,
+    options?: { maxTurns?: number },
   ): Promise<ProcessTurnResult> {
     const row = this.getConversationRow(callSid);
     if (!row) {
@@ -114,7 +127,25 @@ export class VoiceAgent extends DurableObject<Env> {
     const urgent = row.urgent === 1 || turnUrgency.urgent;
     const urgencyPhrase = row.urgency_phrase ?? (turnUrgency.urgent ? turnUrgency.phrase ?? null : null);
 
-    const result = this.nextTurn(row.dialog_state, currentSlots, slots, userMessage, runtimeConfig);
+    const nextTurnCount = row.turn_count + 1;
+    const maxTurns = options?.maxTurns ?? 12;
+    const turnLimitReached = nextTurnCount >= maxTurns;
+
+    let result = this.nextTurn(row.dialog_state, currentSlots, slots, userMessage, runtimeConfig);
+
+    // Limite de turnos: si el usuario no completo antes del maximo, cerramos la
+    // llamada con un mensaje amable. Registramos como cancelled para no marcar
+    // lead confirmado. La captura parcial (nombre/motivo) queda en la fila para
+    // que el equipo pueda darle seguimiento manual desde la UI si lo desea.
+    if (turnLimitReached && !result.isComplete) {
+      result = {
+        responseText:
+          "Perdón, no logré capturar todos los datos por teléfono. Un agente humano se pondrá en contacto contigo para continuar. Gracias por tu paciencia.",
+        dialogState: "cancelled",
+        missingSlots: result.missingSlots,
+        isComplete: true,
+      };
+    }
 
     this.ctx.storage.sql.exec(
       "INSERT INTO messages (conversation_id, role, content, slots_delta) VALUES (?, 'user', ?, ?)",
@@ -125,7 +156,7 @@ export class VoiceAgent extends DurableObject<Env> {
 
     this.ctx.storage.sql.exec(
       `UPDATE conversations
-       SET dialog_state = ?, nombre_cliente = ?, telefono = ?, fecha_hora = ?, motivo = ?, urgent = ?, urgency_phrase = ?, updated_at = strftime('%s','now'), last_message_at = strftime('%s','now')
+       SET dialog_state = ?, nombre_cliente = ?, telefono = ?, fecha_hora = ?, motivo = ?, urgent = ?, urgency_phrase = ?, turn_count = ?, updated_at = strftime('%s','now'), last_message_at = strftime('%s','now')
        WHERE id = ?`,
       result.dialogState,
       slots.nombre_cliente ?? null,
@@ -134,6 +165,7 @@ export class VoiceAgent extends DurableObject<Env> {
       slots.motivo ?? null,
       urgent ? 1 : 0,
       urgencyPhrase,
+      nextTurnCount,
       callSid,
     );
 
@@ -164,6 +196,8 @@ export class VoiceAgent extends DurableObject<Env> {
       slots: { ...slots, telefono: slots.telefono ?? row.phone_number },
       urgent,
       urgencyPhrase: urgencyPhrase ?? undefined,
+      turnCount: nextTurnCount,
+      turnLimitReached,
     };
   }
 
@@ -189,7 +223,7 @@ export class VoiceAgent extends DurableObject<Env> {
   private getConversationRow(callSid: string): ConversationRow | undefined {
     return this.ctx.storage.sql
       .exec<ConversationRow>(
-        `SELECT id, phone_number, dialog_state, nombre_cliente, telefono, fecha_hora, motivo, urgent, urgency_phrase
+        `SELECT id, phone_number, dialog_state, nombre_cliente, telefono, fecha_hora, motivo, urgent, urgency_phrase, turn_count
          FROM conversations WHERE id = ?`,
         callSid,
       )
@@ -271,6 +305,20 @@ export class VoiceAgent extends DurableObject<Env> {
       };
     }
 
+    // Validacion de fecha futura: si el modelo/heur\u00edstica normalizo una fecha
+    // en el pasado, no la aceptamos ni la persistimos. Preguntamos de nuevo.
+    if (slots.fecha_hora && !isFutureDateTime(slots.fecha_hora)) {
+      slots.fecha_hora = undefined;
+      const revisedMissing = getMissingSlots(slots);
+      return {
+        responseText:
+          "Esa fecha ya pasó. ¿Podrías darme un día y hora a partir de hoy? Por ejemplo, mañana en la tarde.",
+        dialogState: "collecting_info",
+        missingSlots: revisedMissing,
+        isComplete: false,
+      };
+    }
+
     if (currentState === "confirming") {
       if (isAffirmative(userMessage) && missingSlots.length === 0) {
         return {
@@ -288,6 +336,7 @@ export class VoiceAgent extends DurableObject<Env> {
           responseText: formatTemplate(
             runtimeConfig?.confirmationTemplate ?? "Perfecto. Queda actualizado: {nombre_cliente}, {fecha_hora}, sobre {motivo}. ¿Es correcto?",
             slots,
+            runtimeConfig?.timeZone,
           ),
           dialogState: "confirming",
           missingSlots,
@@ -311,6 +360,7 @@ export class VoiceAgent extends DurableObject<Env> {
           runtimeConfig?.confirmationTemplate ??
             "Perfecto. Tengo registrada una asesoría para {nombre_cliente}, {fecha_hora}, sobre {motivo}. La idea es revisar una solución tecnológica inteligente y adecuada para tu operación. ¿Es correcto?",
           slots,
+          runtimeConfig?.timeZone,
         ),
         dialogState: "confirming",
         missingSlots,
@@ -403,7 +453,7 @@ function getMissingSlots(slots: ConversationSlots): (keyof ConversationSlots)[] 
 function promptForSlot(slot: keyof ConversationSlots, slots: ConversationSlots, runtimeConfig?: RuntimePromptConfig): string {
   const configuredPrompt = runtimeConfig?.prompts[slot];
   if (configuredPrompt) {
-    return formatTemplate(configuredPrompt, slots);
+    return formatTemplate(configuredPrompt, slots, runtimeConfig?.timeZone);
   }
 
   switch (slot) {
@@ -468,7 +518,7 @@ function answerKnowledgeQuestion(message: string, runtimeConfig?: RuntimePromptC
 function nextPromptAfterKnowledge(slots: ConversationSlots, runtimeConfig?: RuntimePromptConfig): string {
   const missing = getMissingSlots(slots);
   if (!missing.length) {
-    return formatTemplate(runtimeConfig?.confirmationTemplate ?? "¿Quieres que registre tu solicitud para que el equipo te contacte?", slots);
+    return formatTemplate(runtimeConfig?.confirmationTemplate ?? "¿Quieres que registre tu solicitud para que el equipo te contacte?", slots, runtimeConfig?.timeZone);
   }
   return `Para ayudarte mejor, ${promptForSlot(missing[0], slots, runtimeConfig)}`;
 }
@@ -498,10 +548,10 @@ function sameNormalizedText(left: string, right: string): boolean {
   return normalizeForSearch(left).replace(/\s+/g, " ").trim() === normalizeForSearch(right).replace(/\s+/g, " ").trim();
 }
 
-function formatTemplate(template: string, slots: ConversationSlots): string {
+function formatTemplate(template: string, slots: ConversationSlots, timeZone?: string): string {
   return template
     .replaceAll("{nombre_cliente}", slots.nombre_cliente ?? "el cliente")
-    .replaceAll("{fecha_hora}", formatDateTimeForSpeech(slots.fecha_hora))
+    .replaceAll("{fecha_hora}", formatDateTimeForSpeech(slots.fecha_hora, timeZone))
     .replaceAll("{motivo}", slots.motivo ?? "la solicitud");
 }
 
@@ -525,7 +575,18 @@ function isCancellation(message: string): boolean {
 
 
 
-function formatDateTimeForSpeech(value: string | undefined): string {
+function isFutureDateTime(value: string): boolean {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    // No podemos validar sin parsear. Aceptamos para no bloquear el flujo con
+    // fechas expresadas en lenguaje natural que la normalizacion no cubri\u00f3.
+    return true;
+  }
+  // Margen de 5 minutos para tolerar reloj/latencia.
+  return date.getTime() > Date.now() - 5 * 60 * 1000;
+}
+
+function formatDateTimeForSpeech(value: string | undefined, timeZone?: string): string {
   if (!value) {
     return "la fecha y hora indicada";
   }
@@ -536,7 +597,7 @@ function formatDateTimeForSpeech(value: string | undefined): string {
   }
 
   return new Intl.DateTimeFormat("es-MX", {
-    timeZone: "America/Mexico_City",
+    timeZone: timeZone || "America/Mexico_City",
     weekday: "long",
     day: "numeric",
     month: "long",

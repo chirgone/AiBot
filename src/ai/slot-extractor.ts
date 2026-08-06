@@ -76,7 +76,7 @@ Mensaje nuevo: ${userMessage}`,
       max_tokens: 256,
     });
 
-    return withHeuristics(userMessage, context, normalizeSlots(parseAiResponse(result)));
+    return withHeuristics(userMessage, context, normalizeSlots(parseAiResponse(result)), runtimeConfig?.timeZone);
   } catch (error) {
     console.warn(
       JSON.stringify({
@@ -84,7 +84,7 @@ Mensaje nuevo: ${userMessage}`,
         error: error instanceof Error ? error.message : String(error),
       }),
     );
-    return withHeuristics(userMessage, context, fallbackExtractSlots(userMessage));
+    return withHeuristics(userMessage, context, fallbackExtractSlots(userMessage), runtimeConfig?.timeZone);
   }
 }
 
@@ -164,6 +164,7 @@ function withHeuristics(
   message: string,
   context: ConversationContext,
   slots: Partial<ConversationSlots>,
+  timeZone?: string,
 ): Partial<ConversationSlots> {
   const enriched = { ...slots };
   const lower = message.toLowerCase().trim();
@@ -175,7 +176,7 @@ function withHeuristics(
     }
   }
 
-  const deterministicDateTime = inferRelativeDateTime(lower);
+  const deterministicDateTime = inferRelativeDateTime(lower, timeZone);
   if (deterministicDateTime && (!context.slots.fecha_hora || isCorrection(lower) || context.dialogState === "confirming")) {
     enriched.fecha_hora = deterministicDateTime;
   }
@@ -279,16 +280,18 @@ function normalizeText(value: string): string {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-function inferRelativeDateTime(lower: string): string | undefined {
-  if (!/\b(hoy|mañana|pasado mañana|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b/.test(lower)) {
-    return undefined;
-  }
-
-  const today = getMexicoCityToday();
+function inferRelativeDateTime(lower: string, timeZone?: string): string | undefined {
+  const today = getTenantToday(timeZone);
   const target = new Date(Date.UTC(today.year, today.month - 1, today.day, 12, 0, 0));
   const weekdayIndex = parseWeekday(lower);
+  const absolute = parseAbsoluteDate(lower, today);
+  const hasRelative = /\b(hoy|mañana|pasado mañana|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b/.test(lower);
 
-  if (lower.includes("pasado mañana")) {
+  if (absolute) {
+    target.setUTCFullYear(absolute.year);
+    target.setUTCMonth(absolute.month - 1);
+    target.setUTCDate(absolute.day);
+  } else if (lower.includes("pasado mañana")) {
     target.setUTCDate(target.getUTCDate() + 2);
   } else if (lower.includes("mañana")) {
     target.setUTCDate(target.getUTCDate() + 1);
@@ -296,6 +299,8 @@ function inferRelativeDateTime(lower: string): string | undefined {
     const currentWeekday = target.getUTCDay();
     const daysAhead = (weekdayIndex - currentWeekday + 7) % 7 || 7;
     target.setUTCDate(target.getUTCDate() + daysAhead);
+  } else if (!hasRelative) {
+    return undefined;
   }
 
   const time = parseSpokenTime(lower) ?? parseTimeWindow(lower);
@@ -303,7 +308,66 @@ function inferRelativeDateTime(lower: string): string | undefined {
     return undefined;
   }
 
-  return `${target.getUTCFullYear()}-${pad(target.getUTCMonth() + 1)}-${pad(target.getUTCDate())}T${pad(time.hour)}:${pad(time.minute)}:00-06:00`;
+  const offset = tenantOffsetForDate(target, timeZone);
+  return `${target.getUTCFullYear()}-${pad(target.getUTCMonth() + 1)}-${pad(target.getUTCDate())}T${pad(time.hour)}:${pad(time.minute)}:00${offset}`;
+}
+
+// Fechas absolutas en espa\u00f1ol: "15 de agosto", "3 de septiembre", "20 de
+// diciembre a las 10". Sin a\u00f1o explicito, elegimos el proximo mes/dia
+// mayor a hoy; si el dia ya paso este a\u00f1o, saltamos al siguiente.
+function parseAbsoluteDate(
+  lower: string,
+  today: { year: number; month: number; day: number },
+): { year: number; month: number; day: number } | undefined {
+  const match = lower.match(/\b(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\b/);
+  if (!match) return undefined;
+  const day = Number(match[1]);
+  const monthName = match[2];
+  const monthIndex = SPANISH_MONTHS[monthName];
+  if (!monthIndex || day < 1 || day > 31) return undefined;
+  let year = today.year;
+  if (monthIndex < today.month || (monthIndex === today.month && day < today.day)) {
+    year += 1;
+  }
+  return { year, month: monthIndex, day };
+}
+
+const SPANISH_MONTHS: Record<string, number> = {
+  enero: 1,
+  febrero: 2,
+  marzo: 3,
+  abril: 4,
+  mayo: 5,
+  junio: 6,
+  julio: 7,
+  agosto: 8,
+  septiembre: 9,
+  setiembre: 9,
+  octubre: 10,
+  noviembre: 11,
+  diciembre: 12,
+};
+
+// Devuelve el offset ISO ("-06:00", "-05:00", "-03:00") para el timezone dado
+// en la fecha objetivo. Fallback a America/Mexico_City si no viene timezone.
+function tenantOffsetForDate(target: Date, timeZone?: string): string {
+  const tz = timeZone || "America/Mexico_City";
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      timeZoneName: "shortOffset",
+    });
+    const parts = formatter.formatToParts(target);
+    const raw = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT-6";
+    const match = raw.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/);
+    if (!match) return "-06:00";
+    const sign = match[1];
+    const hours = pad(Number(match[2]));
+    const minutes = pad(match[3] ? Number(match[3]) : 0);
+    return `${sign}${hours}:${minutes}`;
+  } catch {
+    return "-06:00";
+  }
 }
 
 function parseTimeWindow(lower: string): { hour: number; minute: number } | undefined {
@@ -313,9 +377,10 @@ function parseTimeWindow(lower: string): { hour: number; minute: number } | unde
   return undefined;
 }
 
-function getMexicoCityToday(): { year: number; month: number; day: number } {
+function getTenantToday(timeZone?: string): { year: number; month: number; day: number } {
+  const tz = timeZone || "America/Mexico_City";
   const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Mexico_City",
+    timeZone: tz,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -326,7 +391,7 @@ function getMexicoCityToday(): { year: number; month: number; day: number } {
   const day = Number(parts.find((part) => part.type === "day")?.value);
 
   if (!year || !month || !day) {
-    throw new Error("Could not resolve Mexico City date");
+    throw new Error(`Could not resolve tenant date for timezone ${tz}`);
   }
 
   return { year, month, day };

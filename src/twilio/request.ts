@@ -33,13 +33,15 @@ export async function readVerifiedTwilioBody(request: Request, env: Env): Promis
 export function parseTwilioVoiceBody(body: string): TwilioVoiceRequest {
   const params = new URLSearchParams(body);
   const callSid = params.get("CallSid") || `call_${crypto.randomUUID()}`;
+  const rawConfidence = params.get("Confidence");
+  const parsedConfidence = rawConfidence !== null ? Number.parseFloat(rawConfidence) : Number.NaN;
 
   return {
     callSid,
     from: params.get("From") ?? "unknown",
     to: params.get("To") ?? "unknown",
     speechResult: params.get("SpeechResult")?.trim() ?? "",
-    confidence: params.get("Confidence") ?? undefined,
+    confidence: Number.isFinite(parsedConfidence) ? parsedConfidence : undefined,
     digits: params.get("Digits") ?? undefined,
   };
 }

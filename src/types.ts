@@ -29,6 +29,8 @@ export interface ProcessTurnResult {
   slots?: ConversationSlots;
   urgent?: boolean;
   urgencyPhrase?: string;
+  turnCount?: number;
+  turnLimitReached?: boolean;
 }
 
 export interface RuntimePromptConfig {
@@ -46,6 +48,10 @@ export interface RuntimePromptConfig {
   prompts: Partial<Record<keyof ConversationSlots, string>>;
   knowledgeSummary: string;
   services: Array<{ name: string; description: string; keywords: string[] }>;
+  speechTimeout?: string;
+  timeout?: string;
+  notifyWebhookUrl?: string;
+  notifyWebhookSecret?: string;
 }
 
 export interface TwilioVoiceRequest {
@@ -53,6 +59,6 @@ export interface TwilioVoiceRequest {
   from: string;
   to: string;
   speechResult: string;
-  confidence?: string;
+  confidence?: number;
   digits?: string;
 }

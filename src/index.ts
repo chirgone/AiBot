@@ -10,7 +10,7 @@ import { twimlGather, twimlSayAndHangup } from "./twilio/twiml";
 export { VoiceAgent };
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     try {
@@ -42,7 +42,7 @@ export default {
       }
 
       if (request.method === "POST" && url.pathname === "/webhook/voice/process") {
-        return await handleVoiceTurn(request, env);
+        return await handleVoiceTurn(request, env, ctx);
       }
 
       return new Response("Not Found", { status: 404 });
@@ -82,31 +82,59 @@ async function handleIncomingCall(request: Request, env: Env): Promise<Response>
     language: runtimeConfig.language,
     voice: runtimeConfig.voice,
     hints: runtimeConfig.speechHints,
+    speechTimeout: runtimeConfig.speechTimeout,
+    timeout: runtimeConfig.timeout,
   });
 }
 
-async function handleVoiceTurn(request: Request, env: Env): Promise<Response> {
+async function handleVoiceTurn(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const body = await readVerifiedTwilioBody(request, env);
   const voiceRequest = parseTwilioVoiceBody(body);
   const stub = env.VOICE_AGENT.getByName(voiceRequest.callSid);
   await stub.initConversation(voiceRequest.callSid, voiceRequest.from);
   const runtimeConfig = await resolveRuntimeConfig(env, voiceRequest.to);
 
+  const minConfidence = Number.parseFloat(env.MIN_SPEECH_CONFIDENCE ?? "0.4");
+  const confidenceFloor = Number.isFinite(minConfidence) ? minConfidence : 0.4;
+  const maxTurns = Number.parseInt(env.MAX_TURNS_PER_CALL ?? "12", 10);
+  const turnLimit = Number.isFinite(maxTurns) && maxTurns > 0 ? maxTurns : 12;
+
   const userMessage = voiceRequest.speechResult || voiceRequest.digits || "";
-  if (!userMessage) {
+  const lowConfidenceSpeech =
+    voiceRequest.speechResult.length > 0 &&
+    typeof voiceRequest.confidence === "number" &&
+    voiceRequest.confidence < confidenceFloor;
+
+  if (!userMessage || lowConfidenceSpeech) {
     const context = await stub.getConversationContext(voiceRequest.callSid);
+    const reason = lowConfidenceSpeech ? "low_confidence" : "empty_speech";
+    console.log(
+      JSON.stringify({
+        message: "voice turn: reprompt",
+        callSid: voiceRequest.callSid,
+        reason,
+        confidence: voiceRequest.confidence ?? null,
+      }),
+    );
+    const promptMessage = lowConfidenceSpeech
+      ? "Perdón, no te escuché bien. ¿Me lo puedes repetir un poco más despacio?"
+      : retryPrompt(context.dialogState, runtimeConfig.fallbackMessage);
     return twimlGather({
       action: "/webhook/voice/process",
-      message: retryPrompt(context.dialogState, runtimeConfig.fallbackMessage),
+      message: promptMessage,
       language: runtimeConfig.language,
       voice: runtimeConfig.voice,
       hints: runtimeConfig.speechHints,
+      speechTimeout: runtimeConfig.speechTimeout,
+      timeout: runtimeConfig.timeout,
     });
   }
 
   const context = await stub.getConversationContext(voiceRequest.callSid);
   const slots = await extractSlots(env, userMessage, context, runtimeConfig);
-  const result = await stub.processTurn(voiceRequest.callSid, userMessage, slots, runtimeConfig);
+  const result = await stub.processTurn(voiceRequest.callSid, userMessage, slots, runtimeConfig, {
+    maxTurns: turnLimit,
+  });
   console.log(
     JSON.stringify({
       message: "voice turn",
@@ -116,6 +144,9 @@ async function handleVoiceTurn(request: Request, env: Env): Promise<Response> {
       responseLength: result.responseText.length,
       missingSlots: result.missingSlots,
       urgent: result.urgent === true,
+      confidence: voiceRequest.confidence ?? null,
+      turnCount: result.turnCount ?? null,
+      turnLimitReached: result.turnLimitReached === true,
     }),
   );
 
@@ -128,6 +159,7 @@ async function handleVoiceTurn(request: Request, env: Env): Promise<Response> {
         voiceRequest.from,
         result.slots,
         { urgent: result.urgent, phrase: result.urgencyPhrase },
+        ctx,
       );
     }
 
@@ -140,6 +172,8 @@ async function handleVoiceTurn(request: Request, env: Env): Promise<Response> {
     language: runtimeConfig.language,
     voice: runtimeConfig.voice,
     hints: runtimeConfig.speechHints,
+    speechTimeout: runtimeConfig.speechTimeout,
+    timeout: runtimeConfig.timeout,
   });
 }
 
