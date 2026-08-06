@@ -187,7 +187,7 @@ function withHeuristics(
     }
   }
 
-  if (context.slots.motivo && isUrgentTiming(lower)) {
+  if (context.slots.motivo && needsTimeWindow(lower)) {
     enriched.motivo = undefined;
   }
 
@@ -198,8 +198,30 @@ function isCorrection(lower: string): boolean {
   return /\b(no|cambia|cambiar|corrige|corregir|mejor|otra hora|otro dia|otro día|seria|sería)\b/.test(lower);
 }
 
-function isUrgentTiming(lower: string): boolean {
-  return /\b(lo antes posible|cuanto antes|urgente|hoy mismo|en cuanto puedan|en cuanto sea posible|lo mas pronto|lo más pronto|pronto)\b/.test(lower);
+// Frases que fuerzan al bot a preguntar la ventana (mañana/tarde/noche) porque
+// el usuario no dio una hora exacta. NO todas implican urgencia real.
+function needsTimeWindow(lower: string): boolean {
+  return URGENT_STRICT_REGEX.test(lower) || URGENT_LOOSE_REGEX.test(lower);
+}
+
+// Urgencia real: lo persistimos como leads.urgent = 1.
+const URGENT_STRICT_REGEX =
+  /\b(lo antes posible|cuanto antes|urgente|urge|urg[ée]ncia|emergencia|hoy mismo|inmediato|inmediata|de inmediato|ya mismo|ahora mismo)\b/i;
+
+// Vagas — piden ventana pero no marcan urgencia.
+const URGENT_LOOSE_REGEX =
+  /\b(en cuanto puedan|en cuanto sea posible|lo m[aá]s pronto|pronto|cuando puedan)\b/i;
+
+export function detectUrgency(message: string): { urgent: boolean; phrase?: string; needsWindow: boolean } {
+  const strict = message.match(URGENT_STRICT_REGEX);
+  if (strict) {
+    return { urgent: true, phrase: strict[0].toLowerCase(), needsWindow: true };
+  }
+  const loose = message.match(URGENT_LOOSE_REGEX);
+  if (loose) {
+    return { urgent: false, phrase: loose[0].toLowerCase(), needsWindow: true };
+  }
+  return { urgent: false, needsWindow: false };
 }
 
 function inferName(message: string): string | undefined {

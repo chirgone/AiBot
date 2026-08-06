@@ -27,6 +27,8 @@ export interface ProcessTurnResult {
   isComplete: boolean;
   appointmentId?: string;
   slots?: ConversationSlots;
+  urgent?: boolean;
+  urgencyPhrase?: string;
 }
 
 export interface RuntimePromptConfig {

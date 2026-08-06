@@ -115,12 +115,20 @@ async function handleVoiceTurn(request: Request, env: Env): Promise<Response> {
       complete: result.isComplete,
       responseLength: result.responseText.length,
       missingSlots: result.missingSlots,
+      urgent: result.urgent === true,
     }),
   );
 
   if (result.isComplete) {
     if (result.dialogState === "booked" && result.slots) {
-      await recordConfirmedLead(env, runtimeConfig, voiceRequest.callSid, voiceRequest.from, result.slots);
+      await recordConfirmedLead(
+        env,
+        runtimeConfig,
+        voiceRequest.callSid,
+        voiceRequest.from,
+        result.slots,
+        { urgent: result.urgent, phrase: result.urgencyPhrase },
+      );
     }
 
     return twimlSayAndHangup(result.responseText, runtimeConfig.language, runtimeConfig.voice);

@@ -196,6 +196,35 @@ function adminHtml(email: string): string {
       .accordion-body { display: none; padding: 0 20px 20px; }
       .accordion-section.open .accordion-body { display: block; }
 
+      .leads-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+      .lead-filter { padding: 8px 14px; border-radius: 999px; background: #0b182a; border: 1px solid var(--line); color: var(--muted); font-weight: 700; font-size: 13px; }
+      .lead-filter.active { background: var(--brand); color: #061120; border-color: transparent; }
+      .lead-filter[disabled] { opacity: .4; cursor: not-allowed; }
+      .lead-counter-urgent { color: var(--danger); font-weight: 800; }
+
+      .leads-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+      .leads-table thead th { text-align: left; padding: 10px 12px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--line); }
+      .leads-table tbody td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+      .leads-table tbody tr.urgent { background: rgba(255, 122, 144, .06); }
+      .leads-table tbody tr.urgent td:first-child { border-left: 3px solid var(--danger); }
+      .leads-table .lead-name { font-weight: 700; color: var(--ink); }
+      .leads-table .lead-phone { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; color: var(--muted); }
+      .leads-table .lead-service { color: var(--ink); }
+      .leads-table .lead-meta { color: var(--muted); font-size: 12px; }
+
+      .lead-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+      .lead-badge.urgent { background: rgba(255, 122, 144, .18); color: #ffd4dc; border: 1px solid rgba(255, 122, 144, .5); }
+      .lead-badge.normal { background: #0b182a; color: var(--muted); border: 1px solid var(--line); }
+      .lead-badge.status { background: rgba(73, 209, 125, .16); color: #b7f3cf; border: 1px solid rgba(73, 209, 125, .4); }
+
+      @media (max-width: 720px) {
+        .leads-table thead { display: none; }
+        .leads-table, .leads-table tbody, .leads-table tr, .leads-table td { display: block; width: 100%; }
+        .leads-table tr { padding: 12px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; }
+        .leads-table tbody td { border: 0; padding: 4px 0; }
+        .leads-table tbody tr.urgent { border-color: rgba(255, 122, 144, .5); }
+      }
+
       .panel, .card, .step {
         border: 1px solid var(--line);
         background: var(--panel);
@@ -430,7 +459,7 @@ function adminHtml(email: string): string {
   <body>
     <header>
       <div>
-        <span class="pill">Estudio Conversacional AngaFlow · v1.2.3</span>
+        <span class="pill">Estudio Conversacional AngaFlow · v1.3.0</span>
         <h1>Crea bots conversacionales desde la web de cada negocio.</h1>
         <p class="hero-copy">Selecciona una vertical, carga la URL raíz, escanea rutas corporativas y publica un flujo conversacional listo para voz, chat o WhatsApp.</p>
       </div>
@@ -589,10 +618,15 @@ function adminHtml(email: string): string {
               <section id="leads-section" class="panel accordion-section" data-accordion="leads">
                 <h3 class="accordion-heading">
                   <button id="leads-toggle" class="accordion-toggle" type="button" aria-expanded="false" aria-controls="leads-body">
-                    Prospectos Confirmados <span>seguimiento</span>
+                    Prospectos Confirmados <span id="leadsCounter">seguimiento</span>
                   </button>
                 </h3>
                 <div id="leads-body" class="accordion-body" role="region" aria-labelledby="leads-toggle">
+                  <div class="leads-toolbar" role="group" aria-label="Filtrar prospectos">
+                    <button type="button" class="lead-filter active" data-filter="all">Todos</button>
+                    <button type="button" class="lead-filter" data-filter="urgent">Urgentes</button>
+                    <button type="button" class="lead-filter" data-filter="normal">Normales</button>
+                  </div>
                   <div id="leads"></div>
                 </div>
               </section>
@@ -606,7 +640,7 @@ function adminHtml(email: string): string {
       const DEFAULT_ASSISTANT_NAME = '${DEFAULT_ASSISTANT_NAME}';
       const DEFAULT_VOICE_NUMBER = '${DEFAULT_VOICE_NUMBER}';
       const SCAN_PAGE_LIMIT = 40;
-      const state = { tenantId: null, tenants: [], templates: [], lastPublish: null };
+      const state = { tenantId: null, tenants: [], templates: [], lastPublish: null, leads: [], leadsFilter: 'all', leadsAutoOpened: false };
       const $ = (id) => document.getElementById(id);
       const HTML_ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' };
       const esc = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => HTML_ENTITIES[char] ?? char);
@@ -740,6 +774,7 @@ function adminHtml(email: string): string {
         document.querySelectorAll('.tenant-card').forEach(button => {
           button.addEventListener('click', async () => {
             state.tenantId = button.dataset.id;
+            state.leadsAutoOpened = false;
             renderBusinessDashboard();
             renderTenantEditor();
             renderTemplatePicker();
@@ -854,7 +889,10 @@ function adminHtml(email: string): string {
         $('flow').innerHTML = empty('Sin flujo', 'Al crear el negocio se genera un borrador inicial.');
         $('flowTemplate').innerHTML = '';
         $('templateDescription').textContent = '';
-        $('leads').innerHTML = empty('Sin prospectos', 'Los prospectos confirmados aparecerán cuando el agente empiece a operar.');
+        $('leads').innerHTML = empty(
+          'Sin prospectos',
+          'Los prospectos confirmados aparecerán cuando el agente empiece a operar. Llama al ' + DEFAULT_VOICE_NUMBER + ' para generar el primero.',
+        );
       }
 
       async function loadServices() {
@@ -998,7 +1036,117 @@ function adminHtml(email: string): string {
 
       async function loadLeads() {
         const data = await api('tenants/' + state.tenantId + '/leads');
-        $('leads').innerHTML = data.leads.length ? data.leads.map(l => '<div class="list-row"><span><strong>'+esc(l.name || 'Sin nombre')+'</strong><br><span class="muted">'+esc(l.phone)+' · '+esc(l.service || 'Sin servicio')+'</span></span><span class="status">'+esc(l.status)+'</span></div>').join('') : empty('Sin prospectos confirmados', 'Cuando un usuario confirme una cita, el prospecto aparecerá aquí.');
+        state.leads = (data.leads || []).map(normalizeLead);
+        state.leadsFilter = state.leadsFilter || 'all';
+        renderLeadsCounter();
+        renderLeadsBody();
+        bindLeadFilters();
+        maybeAutoOpenLeads();
+      }
+
+      function normalizeLead(lead) {
+        let meta = {};
+        try { meta = JSON.parse(lead.metadata || '{}'); } catch { meta = {}; }
+        return {
+          id: lead.id,
+          name: lead.name || 'Sin nombre',
+          phone: lead.phone || '',
+          service: lead.service || 'Sin servicio',
+          requestedAt: lead.requested_at || '',
+          status: lead.status || 'confirmed',
+          createdAt: lead.created_at,
+          urgent: Number(lead.urgent) === 1,
+          urgencyPhrase: meta && typeof meta.urgencyPhrase === 'string' ? meta.urgencyPhrase : null,
+        };
+      }
+
+      function renderLeadsCounter() {
+        const urgent = state.leads.filter(l => l.urgent).length;
+        const total = state.leads.length;
+        const counter = $('leadsCounter');
+        if (!counter) return;
+        if (!total) { counter.textContent = 'seguimiento'; return; }
+        const totalLabel = total + ' prospecto' + (total === 1 ? '' : 's');
+        if (urgent === 0) { counter.textContent = totalLabel; return; }
+        counter.innerHTML = esc(totalLabel) + ' · <span class="lead-counter-urgent">' + esc(urgent) + ' urgente' + (urgent === 1 ? '' : 's') + '</span>';
+      }
+
+      function filteredLeads() {
+        if (state.leadsFilter === 'urgent') return state.leads.filter(l => l.urgent);
+        if (state.leadsFilter === 'normal') return state.leads.filter(l => !l.urgent);
+        return state.leads;
+      }
+
+      function renderLeadsBody() {
+        const container = $('leads');
+        if (!container) return;
+        const leads = filteredLeads();
+        if (!state.leads.length) {
+          container.innerHTML = empty(
+            'Sin prospectos confirmados',
+            'Haz una llamada de prueba al ' + DEFAULT_VOICE_NUMBER + ' para generar el primer prospecto. Los urgentes aparecerán marcados en rojo.',
+          );
+          return;
+        }
+        if (!leads.length) {
+          container.innerHTML = empty(
+            state.leadsFilter === 'urgent' ? 'Sin prospectos urgentes' : 'Sin prospectos normales',
+            'Cambia el filtro para ver el resto.',
+          );
+          return;
+        }
+        const rows = leads.map(lead => {
+          const badge = lead.urgent
+            ? '<span class="lead-badge urgent" title="'+esc(lead.urgencyPhrase || 'Marcado como urgente')+'">Urgente</span>'
+            : '<span class="lead-badge normal">Normal</span>';
+          return [
+            '<tr class="'+(lead.urgent ? 'urgent' : '')+'">',
+              '<td>'+badge+'</td>',
+              '<td><div class="lead-name">'+esc(lead.name)+'</div><div class="lead-meta">'+esc(formatCreatedAt(lead.createdAt))+'</div></td>',
+              '<td><div class="lead-phone">'+esc(lead.phone || '—')+'</div></td>',
+              '<td><div class="lead-service">'+esc(lead.service)+'</div>'+(lead.requestedAt ? '<div class="lead-meta">Cita: '+esc(lead.requestedAt)+'</div>' : '')+'</td>',
+              '<td><span class="lead-badge status">'+esc(lead.status)+'</span></td>',
+            '</tr>'
+          ].join('');
+        }).join('');
+        container.innerHTML = [
+          '<table class="leads-table" aria-label="Prospectos confirmados">',
+            '<thead><tr><th>Prioridad</th><th>Prospecto</th><th>Teléfono</th><th>Servicio</th><th>Status</th></tr></thead>',
+            '<tbody>'+rows+'</tbody>',
+          '</table>'
+        ].join('');
+      }
+
+      function bindLeadFilters() {
+        document.querySelectorAll('.lead-filter').forEach(button => {
+          if (button.dataset.bound === 'true') return;
+          button.dataset.bound = 'true';
+          button.addEventListener('click', () => {
+            state.leadsFilter = button.dataset.filter;
+            document.querySelectorAll('.lead-filter').forEach(btn => btn.classList.toggle('active', btn === button));
+            renderLeadsBody();
+          });
+        });
+      }
+
+      function maybeAutoOpenLeads() {
+        if (state.leadsAutoOpened) return;
+        const hasUrgent = state.leads.some(l => l.urgent);
+        if (!hasUrgent) return;
+        const section = $('leads-section');
+        const toggle = $('leads-toggle');
+        if (!section || !toggle) return;
+        section.classList.add('open');
+        toggle.setAttribute('aria-expanded', 'true');
+        state.leadsAutoOpened = true;
+      }
+
+      function formatCreatedAt(epochSeconds) {
+        if (!epochSeconds) return '';
+        const ms = Number(epochSeconds) * 1000;
+        if (!Number.isFinite(ms)) return '';
+        try { return new Date(ms).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' }); }
+        catch { return ''; }
       }
 
       $('createTenant').addEventListener('click', async () => {

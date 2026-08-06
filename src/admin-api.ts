@@ -364,10 +364,11 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
 
   if (request.method === "GET" && action === "leads") {
     const leads = await env.DB.prepare(
-      `SELECT id, channel, conversation_id, name, phone, email, company, service, requested_at, status, source, created_at
+      `SELECT id, channel, conversation_id, name, phone, email, company, service, requested_at,
+              status, source, urgent, metadata, created_at
          FROM leads
         WHERE tenant_id = ?
-        ORDER BY created_at DESC
+        ORDER BY urgent DESC, created_at DESC
         LIMIT 100`,
     )
       .bind(tenantId)

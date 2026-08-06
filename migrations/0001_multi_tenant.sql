@@ -105,10 +105,12 @@ CREATE TABLE IF NOT EXISTS leads (
   status TEXT NOT NULL DEFAULT 'new',
   source TEXT NOT NULL DEFAULT 'voice',
   metadata TEXT NOT NULL DEFAULT '{}',
+  urgent INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
   updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
   UNIQUE(tenant_id, conversation_id)
 );
+CREATE INDEX IF NOT EXISTS idx_leads_tenant_urgent_created ON leads(tenant_id, urgent DESC, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS audit_events (
   id TEXT PRIMARY KEY,

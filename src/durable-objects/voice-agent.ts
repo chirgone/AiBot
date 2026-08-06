@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { detectUrgency } from "../ai/slot-extractor";
 import type { ConversationContext, ConversationSlots, DialogState, ProcessTurnResult, RuntimePromptConfig } from "../types";
 
 interface ConversationRow extends Record<string, SqlStorageValue> {
@@ -9,6 +10,8 @@ interface ConversationRow extends Record<string, SqlStorageValue> {
   telefono: string | null;
   fecha_hora: string | null;
   motivo: string | null;
+  urgent: number;
+  urgency_phrase: string | null;
 }
 
 export class VoiceAgent extends DurableObject<Env> {
@@ -24,6 +27,8 @@ export class VoiceAgent extends DurableObject<Env> {
           telefono TEXT,
           fecha_hora TEXT,
           motivo TEXT,
+          urgent INTEGER NOT NULL DEFAULT 0,
+          urgency_phrase TEXT,
           created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
           updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
           last_message_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
@@ -103,6 +108,12 @@ export class VoiceAgent extends DurableObject<Env> {
       ...incomingSlots,
       motivo: incomingSlots.motivo ?? knowledgeAnswer?.serviceName,
     });
+
+    // Sticky: una vez que el usuario expresa urgencia, la conversación queda marcada.
+    const turnUrgency = detectUrgency(userMessage);
+    const urgent = row.urgent === 1 || turnUrgency.urgent;
+    const urgencyPhrase = row.urgency_phrase ?? (turnUrgency.urgent ? turnUrgency.phrase ?? null : null);
+
     const result = this.nextTurn(row.dialog_state, currentSlots, slots, userMessage, runtimeConfig);
 
     this.ctx.storage.sql.exec(
@@ -114,13 +125,15 @@ export class VoiceAgent extends DurableObject<Env> {
 
     this.ctx.storage.sql.exec(
       `UPDATE conversations
-       SET dialog_state = ?, nombre_cliente = ?, telefono = ?, fecha_hora = ?, motivo = ?, updated_at = strftime('%s','now'), last_message_at = strftime('%s','now')
+       SET dialog_state = ?, nombre_cliente = ?, telefono = ?, fecha_hora = ?, motivo = ?, urgent = ?, urgency_phrase = ?, updated_at = strftime('%s','now'), last_message_at = strftime('%s','now')
        WHERE id = ?`,
       result.dialogState,
       slots.nombre_cliente ?? null,
       slots.telefono ?? row.phone_number,
       slots.fecha_hora ?? null,
       slots.motivo ?? null,
+      urgent ? 1 : 0,
+      urgencyPhrase,
       callSid,
     );
 
@@ -145,7 +158,13 @@ export class VoiceAgent extends DurableObject<Env> {
       result.responseText,
     );
 
-    return { ...result, appointmentId, slots: { ...slots, telefono: slots.telefono ?? row.phone_number } };
+    return {
+      ...result,
+      appointmentId,
+      slots: { ...slots, telefono: slots.telefono ?? row.phone_number },
+      urgent,
+      urgencyPhrase: urgencyPhrase ?? undefined,
+    };
   }
 
   async endConversation(callSid: string, reason: "hangup" | "timeout" | "error"): Promise<void> {
@@ -170,7 +189,7 @@ export class VoiceAgent extends DurableObject<Env> {
   private getConversationRow(callSid: string): ConversationRow | undefined {
     return this.ctx.storage.sql
       .exec<ConversationRow>(
-        `SELECT id, phone_number, dialog_state, nombre_cliente, telefono, fecha_hora, motivo
+        `SELECT id, phone_number, dialog_state, nombre_cliente, telefono, fecha_hora, motivo, urgent, urgency_phrase
          FROM conversations WHERE id = ?`,
         callSid,
       )
@@ -232,9 +251,12 @@ export class VoiceAgent extends DurableObject<Env> {
     }
 
     const missingSlots = getMissingSlots(slots);
-    if (!slots.fecha_hora && isUrgentTiming(userMessage)) {
+    const urgencyRead = detectUrgency(userMessage);
+    if (!slots.fecha_hora && urgencyRead.needsWindow) {
       return {
-        responseText: "Entiendo, lo marco como urgente. Para que el equipo pueda contactarte, ¿prefieres hoy en la mañana, hoy en la tarde o mañana?",
+        responseText: urgencyRead.urgent
+          ? "Entiendo, lo marco como urgente. Para que el equipo pueda contactarte, ¿prefieres hoy en la mañana, hoy en la tarde o mañana?"
+          : "Perfecto. Para agendar, ¿prefieres hoy en la mañana, hoy en la tarde o mañana?",
         dialogState: "collecting_info",
         missingSlots,
         isComplete: false,
@@ -501,9 +523,7 @@ function isCancellation(message: string): boolean {
   return /\b(cancelar|cancela|olvidalo|olvídalo|ya no|no gracias)\b/i.test(message);
 }
 
-function isUrgentTiming(message: string): boolean {
-  return /\b(lo antes posible|cuanto antes|urgente|hoy mismo|en cuanto puedan|en cuanto sea posible|lo mas pronto|lo más pronto|pronto)\b/i.test(message);
-}
+
 
 function formatDateTimeForSpeech(value: string | undefined): string {
   if (!value) {

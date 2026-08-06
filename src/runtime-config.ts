@@ -141,20 +141,29 @@ export async function recordConfirmedLead(
   conversationId: string,
   phone: string,
   slots: { nombre_cliente?: string; telefono?: string; fecha_hora?: string; motivo?: string },
+  urgency?: { urgent?: boolean; phrase?: string },
 ): Promise<void> {
   if (config.tenantId === "fallback") {
     return;
   }
 
+  const urgent = urgency?.urgent ? 1 : 0;
+  const metadata: Record<string, unknown> = { appointmentId: conversationId };
+  if (urgency?.phrase) {
+    metadata.urgencyPhrase = urgency.phrase;
+  }
+
   await env.DB.prepare(
-    `INSERT INTO leads (id, tenant_id, channel, conversation_id, name, phone, service, requested_at, status, source, metadata)
-     VALUES (?, ?, 'voice', ?, ?, ?, ?, ?, 'confirmed', 'voice', ?)
+    `INSERT INTO leads (id, tenant_id, channel, conversation_id, name, phone, service, requested_at, status, source, metadata, urgent)
+     VALUES (?, ?, 'voice', ?, ?, ?, ?, ?, 'confirmed', 'voice', ?, ?)
      ON CONFLICT(tenant_id, conversation_id) DO UPDATE SET
        name = excluded.name,
        phone = excluded.phone,
        service = excluded.service,
        requested_at = excluded.requested_at,
        status = 'confirmed',
+       metadata = excluded.metadata,
+       urgent = CASE WHEN excluded.urgent = 1 THEN 1 ELSE leads.urgent END,
        updated_at = strftime('%s','now')`,
   )
     .bind(
@@ -165,7 +174,8 @@ export async function recordConfirmedLead(
       slots.telefono ?? phone,
       slots.motivo ?? null,
       slots.fecha_hora ?? null,
-      JSON.stringify({ appointmentId: conversationId }),
+      JSON.stringify(metadata),
+      urgent,
     )
     .run();
 }
