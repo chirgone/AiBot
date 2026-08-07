@@ -1,0 +1,19 @@
+src/agents/dialog-manager.ts
+  s_7dad54ead494cf::t_6c04934da2d6c6 67-124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "02c7b277abe0a077ee370421891602f0ace1912b",
+  "prompts": {},
+  "sessions": {
+    "s_7dad54ead494cf": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14cd9f1daffesp9zJzHYfzLEH7",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Ivan Anguiano <jose301184@gmail.com>"
+    }
+  }
+}
