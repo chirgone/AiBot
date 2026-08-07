@@ -1,5 +1,6 @@
-import { extractSlots } from "./ai/slot-extractor";
-import { answerFromContext, searchKnowledgeContext } from "./ai/rag";
+import { extractSlots } from "./agents/slot-extractor";
+import { answerFromContext, searchKnowledgeContext } from "./agents/rag-agent";
+import { looksLikeSlotAnswer } from "./agents/intent-classifier";
 import { handleAdminApi, requireAdmin } from "./admin-api";
 import { renderAccessRequiredPage, renderAdminPage } from "./admin-page";
 import { VoiceAgent } from "./durable-objects/voice-agent";
@@ -19,6 +20,12 @@ export default {
     try {
       if (url.pathname === "/health") {
         return Response.json({ ok: true, service: "agentica-voice" });
+      }
+
+      // access.angaflow.mx -> redirige al portal branded de Cloudflare Access
+      if (url.hostname === "access.angaflow.mx") {
+        const target = new URL(url.pathname + url.search, "https://angaflow.cloudflareaccess.com");
+        return Response.redirect(target.toString(), 302);
       }
 
       if ((request.method === "GET" || request.method === "HEAD") && (url.hostname === "help.angaflow.mx" || url.pathname === "/docs")) {
@@ -215,35 +222,9 @@ function retryPrompt(dialogState: string, fallbackMessage: string): string {
   return fallbackMessage;
 }
 
-// Heur\u00edstica barata para decidir si vale la pena lanzar RAG. Evita el
-// overhead (embedding + query + LLM ~1-2s) cuando el mensaje es solo un
-// nombre, un tel\u00e9fono o una confirmaci\u00f3n. Copia local para no
-// exportar la del DO.
-// Heur\u00edstica ESTRUCTURAL multitenant. En vez de allowlist de keywords
-// (que romp\u00eda con cada vertical nuevo), detectamos si el mensaje es
-// trivialmente una respuesta a un slot esperado. Si NO lo es, corremos
-// RAG y dejamos que el score m\u00ednimo + fallback honesto decida.
-//
-// Retorna true (skip RAG) cuando el mensaje es:
-//   - S\u00ed / No / OK / Gracias / etc. (afirmaciones cortas)
-//   - Un solo n\u00famero (tel\u00e9fono, cantidad, hora)
-//   - Muy corto (<6 chars) sin signos de interrogaci\u00f3n
-//   - Solo una fecha/hora (parseable como tiempo)
-//
-// Todo lo dem\u00e1s dispara RAG. El vector search es barato y filtered by
-// tenant, y el gate MIN_SCORE_FOR_ANSWER descarta si no hay match real.
-function looksLikeSlotAnswer(message: string): boolean {
-  const m = message.trim();
-  if (!m) return true;
-  // Confirmaciones/negaciones/agradecimientos cortos
-  if (/^(s[ií]|no|ok|okey|okay|correcto|as[ií] es|efectivamente|claro|por supuesto|gracias|adi[oó]s|nada m[aá]s|est[aá] bien|de acuerdo|listo|entendido)[\s.!?,]*$/i.test(m)) return true;
-  // Solo n\u00fameros (tel\u00e9fono, cantidad, hora suelta)
-  if (/^[\d\s\-+().]+$/.test(m) && m.replace(/\D/g, "").length >= 3) return true;
-  // Muy corto sin signo de pregunta \u2014 probablemente nombre o palabra suelta
-  if (m.length < 6 && !/[?¿]/.test(m)) return true;
-  // Todo lo dem\u00e1s: intentar RAG
-  return false;
-}
+// `looksLikeSlotAnswer` vive en agents/intent-classifier.ts. Es la
+// heurística estructural multi-tenant que decide si vale la pena
+// lanzar RAG. El worker la importa arriba.
 
 async function resolveRagAnswer(
   env: Env,
