@@ -16,6 +16,10 @@
     {
       "pattern": "admin.angaflow.mx",
       "custom_domain": true
+    },
+    {
+      "pattern": "access.angaflow.mx",
+      "custom_domain": true
     }
   ],
   "observability": {
@@ -51,6 +55,15 @@
     {
       "binding": "VECTORIZE",
       "index_name": "agentica-knowledge"
+    }
+  ],
+  "browser": {
+    "binding": "BROWSER"
+  },
+  "r2_buckets": [
+    {
+      "binding": "SNAPSHOTS",
+      "bucket_name": "agentica-snapshots"
     }
   ],
   "migrations": [
