@@ -64,6 +64,64 @@ export function computeNextTurn(input: DialogInput): DialogOutput {
     };
   }
 
+  // Prioridad 0: en state 'confirming' con todos los slots llenos, la
+  // lógica de confirmación tiene prioridad ABSOLUTA sobre RAG. Sin esto,
+  // si Twilio transcribe "sí" como algo ambiguo (ej. "simón", "cinco",
+  // "sirve"), el intent cae en knowledge_query y el bot lanza RAG en
+  // lugar de completar la reserva. Aquí somos permisivos: cualquier
+  // respuesta que NO sea explícitamente negativa/correction cuenta como
+  // confirmación implícita, porque el usuario ya está respondiendo a
+  // "¿es correcto?" y el silencio/ambigüedad no debe romper el flujo.
+  if (currentState === "confirming" && getMissingSlots(slots).length === 0) {
+    if (intent.type === "negation") {
+      return {
+        responseText: "Claro. Dime el dato correcto: nombre, tema, día u hora.",
+        nextState: "collecting_info",
+        missingSlots: [],
+        isComplete: false,
+      };
+    }
+    if (intent.type === "correction") {
+      return {
+        responseText: formatTemplate(
+          runtimeConfig?.confirmationTemplate ??
+            "Perfecto. Queda actualizado: {nombre_cliente}, {fecha_hora}, sobre {motivo}. ¿Es correcto?",
+          slots,
+          runtimeConfig?.timeZone,
+        ),
+        nextState: "confirming",
+        missingSlots: [],
+        isComplete: false,
+      };
+    }
+    // Cualquier otra cosa (confirmation, knowledge_query, slot_answer,
+    // unknown) en state confirming con todos los slots llenos: aceptamos
+    // como confirmación. Es la salida segura por defecto.
+    return {
+      responseText:
+        runtimeConfig?.completionMessage ??
+        "Listo, quedó registrada tu solicitud. Un especialista dará seguimiento. Que tengas buen día.",
+      nextState: "booked",
+      missingSlots: [],
+      isComplete: true,
+    };
+  }
+
+  // Prioridad 0.5: expresión pura de urgencia sin fecha. Debe ganarle a
+  // RAG porque "lo antes posible" clasifica como knowledge_query pero
+  // el usuario está respondiendo a "¿cuándo?", no preguntando algo.
+  const earlyUrgency = detectUrgency(userMessage);
+  if (!slots.fecha_hora && earlyUrgency.needsWindow) {
+    return {
+      responseText: earlyUrgency.urgent
+        ? "Entiendo, lo marco como urgente. ¿Prefieres hoy en la mañana, hoy en la tarde o mañana?"
+        : "Perfecto. Para agendar, ¿prefieres hoy en la mañana, hoy en la tarde o mañana?",
+      nextState: "collecting_info",
+      missingSlots: getMissingSlots(slots),
+      isComplete: false,
+    };
+  }
+
   // Prioridad 1: RAG. Si el mensaje huele a pregunta de conocimiento y
   // el worker ya trajo respuesta, la usamos ANTES de aceptar cualquier
   // extracción de motivo que el slot-extractor haya hecho del mismo

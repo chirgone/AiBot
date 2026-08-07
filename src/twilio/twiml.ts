@@ -23,20 +23,24 @@ export function twimlGather(options: GatherOptions): Response {
 }
 
 // Twilio acepta "auto" o un entero >= 1. Cualquier otra cosa la rechaza.
+// Default "auto": Twilio detecta pausa natural del hablante en lugar de
+// cortar tras N segundos fijos. Mucho mejor UX en llamadas reales.
 function sanitizeSpeechTimeout(value: string | undefined): string {
-  if (!value) return "1";
+  if (!value) return "auto";
   const trimmed = value.trim();
   if (trimmed.toLowerCase() === "auto") return "auto";
   const num = Number.parseInt(trimmed, 10);
-  if (!Number.isFinite(num) || num < 1 || num > 30) return "1";
+  if (!Number.isFinite(num) || num < 1 || num > 30) return "auto";
   return String(num);
 }
 
-// timeout de Gather: entero 1-600. Fallback 4s.
+// timeout de Gather: entero 1-600. Fallback 8s (tiempo humano para
+// reaccionar tras el prompt en LATAM: el default original de 4s cortaba
+// llamadas antes de que la persona alcanzara a responder).
 function sanitizeTimeout(value: string | undefined): string {
-  if (!value) return "4";
+  if (!value) return "8";
   const num = Number.parseInt(value.trim(), 10);
-  if (!Number.isFinite(num) || num < 1 || num > 600) return "4";
+  if (!Number.isFinite(num) || num < 1 || num > 600) return "8";
   return String(num);
 }
 

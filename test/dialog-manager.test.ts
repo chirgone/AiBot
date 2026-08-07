@@ -198,6 +198,80 @@ describe("computeNextTurn", () => {
     });
   });
 
+  describe("confirming state — permissive affirmatives", () => {
+    const fullSlots = {
+      nombre_cliente: "Ivan",
+      motivo: "ciberseguridad",
+      fecha_hora: "2027-01-15T10:00:00-06:00",
+    };
+
+    it.each([
+      "sí",
+      "sí es correcto",
+      "sip",
+      "simón",
+      "va",
+      "sale",
+      "dale",
+      "correcto",
+      "perfecto",
+      "ajá",
+      "está bien",
+      "confirmo",
+    ])("accepts '%s' as confirmation and books", (userMessage) => {
+      const result = computeNextTurn({
+        currentState: "confirming",
+        previousSlots: fullSlots,
+        currentSlots: fullSlots,
+        userMessage,
+        runtimeConfig: baseConfig,
+      });
+      expect(result.nextState).toBe("booked");
+      expect(result.isComplete).toBe(true);
+    });
+
+    it.each(["no", "está mal", "nel", "incorrecto"])(
+      "treats '%s' as negation → back to collecting",
+      (userMessage) => {
+        const result = computeNextTurn({
+          currentState: "confirming",
+          previousSlots: fullSlots,
+          currentSlots: fullSlots,
+          userMessage,
+          runtimeConfig: baseConfig,
+        });
+        expect(result.nextState).toBe("collecting_info");
+        expect(result.isComplete).toBe(false);
+      },
+    );
+
+    it("ambiguous transcription in confirming books instead of re-asking", () => {
+      // Bug real de producción: Twilio transcribió "sí" como "cinco" y el
+      // bot lanzaba RAG. Ahora la salida segura es aceptar la confirmación.
+      const result = computeNextTurn({
+        currentState: "confirming",
+        previousSlots: fullSlots,
+        currentSlots: fullSlots,
+        userMessage: "cinco",
+        runtimeConfig: baseConfig,
+      });
+      expect(result.nextState).toBe("booked");
+    });
+
+    it("does not activate RAG in confirming when message is question-like", () => {
+      const result = computeNextTurn({
+        currentState: "confirming",
+        previousSlots: fullSlots,
+        currentSlots: fullSlots,
+        userMessage: "cuánto cuesta el servicio",
+        runtimeConfig: baseConfig,
+        ragAnswer: { answer: "Cuesta X pesos", origin: "vectorize" },
+      });
+      // La lógica de confirming tiene prioridad — no vamos a answering_question
+      expect(result.nextState).not.toBe("answering_question");
+    });
+  });
+
   describe("urgency detection", () => {
     it("asks for time window when urgent without specific hour", () => {
       // Nota: usamos motivo genérico "consulta" para evitar que el matcher
@@ -213,6 +287,48 @@ describe("computeNextTurn", () => {
       expect(result.responseText.toLowerCase()).toContain("mañana");
       expect(result.nextState).toBe("collecting_info");
       expect(result.missingSlots).toContain("fecha_hora");
+    });
+
+    it("P2: urgency without hour wins over RAG (does not answer knowledge)", () => {
+      // Regresión de llamada real: "Lo antes posible" clasificaba como
+      // knowledge_query y activaba RAG con contenido no relacionado.
+      // Ahora debe pedir ventana horaria antes que cualquier RAG.
+      const result = computeNextTurn({
+        currentState: "collecting_info",
+        previousSlots: { nombre_cliente: "Ana", motivo: "Redes empresariales" },
+        currentSlots: { nombre_cliente: "Ana", motivo: "Redes empresariales" },
+        userMessage: "Lo antes posible",
+        runtimeConfig: baseConfig,
+        ragAnswer: { answer: "Ofrecemos SOC y NOC 24/7...", origin: "vectorize" },
+      });
+      expect(result.responseText.toLowerCase()).toContain("urgente");
+      expect(result.responseText.toLowerCase()).not.toContain("soc");
+      expect(result.responseText.toLowerCase()).not.toContain("noc");
+      expect(result.nextState).toBe("collecting_info");
+    });
+
+    it("P3: 'márcalo urgente' en confirming se acepta como confirmación (unknown intent)", () => {
+      // El usuario dice "márcalo urgente" en state confirming con slots
+      // llenos. No matchea negation ni correction. Priority-0 block lo
+      // acepta como confirmación implícita → book. La sticky urgency se
+      // aplica en voice-agent.ts (no aquí) via detectUrgency del turno.
+      const result = computeNextTurn({
+        currentState: "confirming",
+        previousSlots: {
+          nombre_cliente: "Ana",
+          motivo: "Redes empresariales",
+          fecha_hora: tomorrowAt(15),
+        },
+        currentSlots: {
+          nombre_cliente: "Ana",
+          motivo: "Redes empresariales",
+          fecha_hora: tomorrowAt(15),
+        },
+        userMessage: "Márcalo como urgente",
+        runtimeConfig: baseConfig,
+      });
+      expect(result.nextState).toBe("booked");
+      expect(result.isComplete).toBe(true);
     });
   });
 });

@@ -30,7 +30,37 @@ export function sanitizeIncomingSlots(
     sanitized.motivo = undefined;
   }
 
+  // Bug de producción: si el usuario dice "lo antes posible" o "urgente"
+  // sin hora concreta, el LLM extractor a veces alucina un timestamp
+  // arbitrario (ej. "viernes 6pm"). Rechazamos fecha_hora cuando el
+  // mensaje solo expresa urgencia y NO contiene señales explícitas de
+  // día/hora. Esto deja el slot vacío para que dialog-manager active
+  // la lógica de ventana horaria (urgencyRead.needsWindow).
+  if (sanitized.fecha_hora && isPureUrgencyExpression(userMessage)) {
+    sanitized.fecha_hora = undefined;
+  }
+
   return sanitized;
+}
+
+// Detecta mensajes que expresan urgencia SIN especificar día/hora.
+// Ejemplos: "lo antes posible", "urgente", "cuanto antes".
+// Si el mensaje tiene señales temporales concretas (día de semana, hora,
+// "mañana", "tarde"), devuelve false porque hay algo que extraer.
+function isPureUrgencyExpression(message: string): boolean {
+  const m = message.trim().toLowerCase();
+  if (!m || m.length > 60) return false;
+
+  const urgencyPattern = /\b(lo antes posible|cuanto antes|urgente|urge|urg[ée]ncia|emergencia|hoy mismo|inmediato|de inmediato|ya mismo|ahora mismo|lo m[aá]s pronto|pronto)\b/i;
+  if (!urgencyPattern.test(m)) return false;
+
+  // Señales temporales concretas que anulan la clasificación de "urgencia pura":
+  // - Días de semana explícitos
+  // - Palabras de franja horaria (mañana, tarde, noche)
+  // - Números que sugieren hora (2pm, 14:00, etc.)
+  // - "hoy" o "mañana" (día relativo)
+  const temporalSignals = /\b(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|ma[ñn]ana|tarde|noche|hoy|mediodia|mediod[ií]a|\d{1,2}\s*(am|pm|de la|hrs|horas?))\b/i;
+  return !temporalSignals.test(m);
 }
 
 // Merge de slots current + incoming, aplicando reglas de deduplicación.

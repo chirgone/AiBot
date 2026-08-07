@@ -92,9 +92,23 @@ async function handleIncomingCall(request: Request, env: Env): Promise<Response>
   await stub.initConversation(voiceRequest.callSid, voiceRequest.from);
   const runtimeConfig = await resolveRuntimeConfig(env, voiceRequest.to);
 
+  const greeting = withInitialQuestion(runtimeConfig.greeting, runtimeConfig.prompts.nombre_cliente);
+
+  // Log del greeting inicial para que la transcripción posterior lo incluya.
+  console.log(
+    JSON.stringify({
+      message: "call started",
+      callSid: voiceRequest.callSid,
+      from: voiceRequest.from,
+      to: voiceRequest.to,
+      tenantId: runtimeConfig.tenantId,
+      botResponse: greeting,
+    }),
+  );
+
   return twimlGather({
     action: "/webhook/voice/process",
-    message: withInitialQuestion(runtimeConfig.greeting, runtimeConfig.prompts.nombre_cliente),
+    message: greeting,
     language: runtimeConfig.language,
     voice: runtimeConfig.voice,
     hints: runtimeConfig.speechHints,
@@ -116,10 +130,34 @@ async function handleVoiceTurn(request: Request, env: Env, ctx: ExecutionContext
   const turnLimit = Number.isFinite(maxTurns) && maxTurns > 0 ? maxTurns : 12;
 
   const userMessage = voiceRequest.speechResult || voiceRequest.digits || "";
+
+  // Twilio reporta confidence=0 en frases muy cortas o de una sola palabra
+  // (sí/no/ok), aunque la transcripción sea correcta. No hacemos reprompt
+  // en ese caso: el texto es probablemente válido y el reprompt frustra
+  // al usuario. Umbral: si confidence===0 exacto Y hay texto, confiamos.
+  const isShortConfidentEnough =
+    voiceRequest.speechResult.length > 0 &&
+    voiceRequest.confidence === 0 &&
+    voiceRequest.speechResult.trim().length < 12;
+
   const lowConfidenceSpeech =
+    !isShortConfidentEnough &&
     voiceRequest.speechResult.length > 0 &&
     typeof voiceRequest.confidence === "number" &&
     voiceRequest.confidence < confidenceFloor;
+
+  // Log del SpeechResult crudo para debug de reconocimiento (ej.
+  // "sí" transcrito como "cinco"). Ver logs con: wrangler tail.
+  if (voiceRequest.speechResult) {
+    console.log(
+      JSON.stringify({
+        message: "twilio speech captured",
+        callSid: voiceRequest.callSid,
+        speechResult: voiceRequest.speechResult,
+        confidence: voiceRequest.confidence ?? null,
+      }),
+    );
+  }
 
   if (!userMessage || lowConfidenceSpeech) {
     const context = await stub.getConversationContext(voiceRequest.callSid);
@@ -174,6 +212,7 @@ async function handleVoiceTurn(request: Request, env: Env, ctx: ExecutionContext
       state: result.dialogState,
       complete: result.isComplete,
       responseLength: result.responseText.length,
+      botResponse: result.responseText,
       missingSlots: result.missingSlots,
       urgent: result.urgent === true,
       confidence: voiceRequest.confidence ?? null,

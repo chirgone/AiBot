@@ -92,15 +92,26 @@ export function isCancellation(message: string): boolean {
 }
 
 export function isAffirmative(message: string): boolean {
-  return /\b(s[ií]|correcto|claro|ok|okay|perfecto|confirmo|confirmado|as[ií] es|exacto|adelante|de acuerdo|est[aá] bien|sale|va|listo|afirmativo|por favor)\b/i.test(
+  // Cubrimos variantes formales (sí, correcto, confirmo), coloquiales
+  // mexicanas (sip, simón, órale, va, sale, dale) y sonidos afirmativos
+  // (ajá, mjm) que Twilio suele transcribir cuando el usuario emite
+  // confirmaciones cortas. Sin esto, un "sip" queda como intent unknown
+  // y el bot re-pregunta indefinidamente o cae en RAG.
+  return /\b(s[ií]p?|s[ií]mon|correcto|claro|ok|okay|okey|perfecto|confirmo|confirmado|as[ií] es|exacto|adelante|de acuerdo|est[aá] bien|sale|va|dale|órale|orale|listo|afirmativo|por favor|as[ií] est[aá] bien|ajá|aja|ajam|mjm|mhm)\b/i.test(
     message,
   );
 }
 
 export function isNegative(message: string): boolean {
-  return /\b(no|incorrecto|cambiar|corregir|otra hora|otro d[ií]a)\b/i.test(message);
+  // "no" solo o con puntuación, o negativos explícitos. Palabras de
+  // corrección viven en hasCorrection para no colisionar con isAffirmative
+  // (ej. "sí, pero cambia la hora" es corrección, no negación total).
+  return /(^|\s)(no|nel|nop|nope|incorrecto|equivocado|est[aá] mal|nada m[aá]s no)([\s.,!?]|$)/i.test(message);
 }
 
 export function hasCorrection(message: string): boolean {
-  return /\b(no|cambia|cambiar|corrige|corregir|mejor|otra hora|otro d[ií]a|ser[ií]a)\b/i.test(message);
+  // Palabras explícitas de corrección. NO incluimos "no" solo porque
+  // colisiona con isNegative — "no" es negación pura, "cambia" es
+  // corrección. Ambos re-abren el flujo pero por distintos caminos.
+  return /\b(cambia|cambiar|corrige|corregir|mejor|otra hora|otro d[ií]a|ser[ií]a|actualiza|modifica)\b/i.test(message);
 }
