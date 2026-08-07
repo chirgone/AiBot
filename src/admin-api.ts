@@ -1,5 +1,5 @@
 import { flowTemplates, getTemplateById, getTemplatesForVertical, type FlowTemplate } from "./flow-templates";
-import { indexKnowledgeSource } from "./ai/rag";
+import { indexKnowledgeSource } from "./agents/rag-agent";
 
 interface AdminIdentity {
   email: string;
@@ -288,29 +288,55 @@ export async function handleAdminApi(request: Request, env: Env, identity: Admin
       notifySecret = notifySecretInput.trim();
     }
 
-    await env.DB.prepare(
-      `UPDATE tenants
-          SET name = ?, slug = ?, vertical = COALESCE(?, vertical), website = ?, country = COALESCE(?, country), timezone = COALESCE(?, timezone), language = COALESCE(?, language),
-              notify_webhook_url = CASE WHEN ? = 1 THEN notify_webhook_url ELSE ? END,
-              notify_webhook_secret = CASE WHEN ? = 1 THEN notify_webhook_secret ELSE ? END,
-              updated_at = strftime('%s','now')
-        WHERE id = ?`,
-    )
-      .bind(
-        name,
-        slugify(name),
-        input.vertical?.trim() || null,
-        website,
-        input.country?.trim() || null,
-        input.timezone?.trim() || null,
-        input.language?.trim() || null,
-        notifyUrl === undefined ? 1 : 0,
-        notifyUrl ?? null,
-        notifySecret === undefined ? 1 : 0,
-        notifySecret ?? null,
-        tenantId,
+    // Slug regeneration: si el nombre cambia, recomputamos slug con la misma
+    // estrategia que CREATE (suffix con ultimos 6 chars del tenantId si el
+    // slug base ya esta ocupado por otro tenant, incluyendo tenants deleted
+    // que aun conservan el slug original).
+    let slug = slugify(name);
+    const slugConflict = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM tenants WHERE slug = ? AND id != ?",
+    ).bind(slug, tenantId).first<{ c: number }>();
+    if (slugConflict && slugConflict.c > 0) {
+      slug = `${slug}-${tenantId.slice(-6)}`;
+    }
+
+    try {
+      await env.DB.prepare(
+        `UPDATE tenants
+            SET name = ?, slug = ?, vertical = COALESCE(?, vertical), website = ?, country = COALESCE(?, country), timezone = COALESCE(?, timezone), language = COALESCE(?, language),
+                notify_webhook_url = CASE WHEN ? = 1 THEN notify_webhook_url ELSE ? END,
+                notify_webhook_secret = CASE WHEN ? = 1 THEN notify_webhook_secret ELSE ? END,
+                updated_at = strftime('%s','now')
+          WHERE id = ?`,
       )
-      .run();
+        .bind(
+          name,
+          slug,
+          input.vertical?.trim() || null,
+          website,
+          input.country?.trim() || null,
+          input.timezone?.trim() || null,
+          input.language?.trim() || null,
+          notifyUrl === undefined ? 1 : 0,
+          notifyUrl ?? null,
+          notifySecret === undefined ? 1 : 0,
+          notifySecret ?? null,
+          tenantId,
+        )
+        .run();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (/UNIQUE.*slug/i.test(msg)) {
+        return json(
+          {
+            error: "Slug conflict: another tenant is already using this name",
+            detail: msg,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
 
     await upsertVoiceChannel(env, tenantId, input.voiceNumber?.trim());
 
